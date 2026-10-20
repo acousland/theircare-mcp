@@ -1,0 +1,46 @@
+{
+  "name": "theircare-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/companion.js",
+    "mcp": "node src/mcp.js",
+    "test": "node --test test/*.test.js",
+    "stop": "node src/stop.js",
+    "config": "node src/config.js",
+    "check": "node scripts/check.js",
+    "test:mcp": "node test/mcp-smoke.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "cheerio": "^1.1.2",
+    "express": "^5.1.0",
+    "tough-cookie": "^6.0.0",
+    "zod": "^3.25.76"
+  },
+  "description": "Local MCP server and companion for TheirCare / FullyBooked bookings, with personal review before saving.",
+  "license": "MIT",
+  "author": "acousland",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/acousland/theircare-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/acousland/theircare-mcp/issues"
+  },
+  "homepage": "https://github.com/acousland/theircare-mcp#readme",
+  "files": [
+    "src/",
+    "public/",
+    "scripts/",
+    "test/",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CONTRIBUTING.md"
+  ]
+}

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TheirCare Companion</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<header><a class="brand" href="/"><span class="mark">tc</span><span>TheirCare <b>companion</b></span></a><div class="connection"><span id="badge">Local prototype</span><button id="logout" class="quiet" hidden>Disconnect</button></div></header>
+<main>
+<section id="welcome">
+<div class="intro"><span class="eyebrow">A little less life admin</span><h1>Your care.<br>A clearer view.</h1><p>See what’s booked, find an available day, and review changes in one place.</p><div class="steps"><span>01 &nbsp; Connect</span><span>02 &nbsp; Explore</span><span>03 &nbsp; Review</span></div></div>
+<div class="login panel"><span class="eyebrow">Connect your account</span><h2>Sign in to TheirCare</h2><p class="muted">This local companion forwards your sign-in to TheirCare over HTTPS. Your password is never saved or sent to the AI. Your session stays in memory on this Mac.</p>
+<form id="login"><label>Email<input name="email" type="email" autocomplete="username" required placeholder="Your TheirCare email"></label><label>Password<input name="password" type="password" autocomplete="off" required placeholder="Your TheirCare password"></label><button type="submit" class="primary">Connect to TheirCare <span>→</span></button></form>
+<div class="sample"><span>Want to look around first?</span><button id="demo" class="quiet">Try sample data →</button></div><p class="fine">Personal prototype · Unaffiliated with TheirCare or FullyBooked.<br>Password sign-in only. Passkeys and extra verification aren’t supported yet.</p></div>
+</section>
+<section id="workspace" hidden>
+<div class="page-title"><div><span class="eyebrow" id="service-label">Your family</span><h1>Care, organised.</h1></div><p class="muted">Australia / Melbourne<br><span id="today"></span></p></div>
+<div class="demo-banner" id="demo-banner" hidden>Sample mode — fictional family and bookings. Nothing here changes a real account.</div>
+<nav aria-label="Sections"><button class="active" data-tab="bookings">Your bookings</button><button data-tab="availability">Find a day</button><button data-tab="review">Review changes <span id="review-count"></span></button></nav>
+<section id="bookings" class="view">
+<div class="section-head"><div><h2>What’s coming up</h2><p class="muted">Your saved bookings, straight from TheirCare.</p></div><form id="booking-range" class="range"><label>From<input type="date" id="book-start" required></label><label>Through<input type="date" id="book-end" required></label><button class="secondary" type="submit">Refresh</button></form></div><div id="booking-results" class="results"></div>
+</section>
+<section id="availability" class="view" hidden>
+<div class="section-head"><div><h2>Find the right day</h2><p class="muted">Select a child and type of care to see availability.</p></div></div>
+<form id="availability-form" class="filter panel"><label>Child<select id="child" required></select></label><label>Care type<select id="care" required></select></label><label>Service<select id="service"></select></label><label>From<input id="avail-start" type="date" required></label><label>Through<input id="avail-end" type="date" required></label><button class="primary" type="submit">Show dates</button></form>
+<div id="conditions" class="conditions" hidden></div><div id="availability-results" class="day-grid"></div>
+<div class="selection-bar" id="selection-bar" hidden><div><strong id="selection-count"></strong><p>Nothing is saved until you review and confirm.</p></div><button id="make-preview" class="primary">Review selected changes →</button></div>
+</section>
+<section id="review" class="view" hidden><div id="review-empty" class="empty"><h2>Ready when you are.</h2><p>Select dates in “Find a day”, or ask your AI to prepare a preview.<br>You’ll see every change here before it’s saved.</p></div><div id="review-content" hidden></div></section>
+</section>
+<div id="notice" role="status" hidden></div>
+<footer>Made for your family’s routine. <span>Local connection · No cloud hosting</span></footer>
+</main></body></html>

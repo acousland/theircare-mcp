@@ -1,0 +1,12 @@
+node_modules/
+.runtime/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+*.tgz
+coverage/
+playwright-report/
+test-results/
+*.har
