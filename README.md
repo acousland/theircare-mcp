@@ -100,23 +100,24 @@ Remote mode runs the companion, an OAuth 2.1 authorization server and a **Stream
 
 What changes in remote mode:
 
-- An **owner password** (not your TheirCare password) protects the companion and every OAuth approval. Only its scrypt hash is configured. After 10 failed attempts in 15 minutes, sign-in is paused for everyone.
+- **Sign in with Google** protects the companion and every OAuth approval. Only the one verified address in `THEIRCARE_OWNER_EMAIL` is let in.
 - AI apps register themselves, then you approve each one in the companion. Access tokens last 1 hour, and refresh tokens last 30 days and rotate on each use. Tokens are stored hashed in `data/oauth.json`. Delete that file to revoke every connection.
 - The local bridge token is disabled. There is still no MCP tool for final saving; you confirm in the companion.
 - Your TheirCare session stays in memory, so after a restart you sign in to TheirCare again.
 
+Create a Google OAuth client first. In [Google Cloud Console](https://console.cloud.google.com/apis/credentials), set up the OAuth consent screen (External, Testing, with your address as a test user). Then create an **OAuth client ID** of type **Web application**, with the authorized redirect URI `<THEIRCARE_PUBLIC_URL>/login/google/callback`. Only the `openid` and `email` scopes are requested.
+
 Docker on a home server with [Tailscale Funnel](https://tailscale.com/kb/1223/funnel):
 
     git clone https://github.com/acousland/theircare-mcp.git && cd theircare-mcp
-    npm run owner-password          # prints THEIRCARE_OWNER_PASSWORD_HASH=...
-    cp .env.example .env            # set THEIRCARE_PUBLIC_URL and paste the hash
+    cp .env.example .env            # public URL, Google client ID/secret, owner email
     mkdir -p data
     docker compose up -d --build
     sudo tailscale funnel --bg --https=8443 http://127.0.0.1:43817
 
 The container publishes only on `127.0.0.1`. Funnel must be allowed for the device in your tailnet policy. Serve TheirCare at the **root of its own Funnel port**: OAuth discovery uses `/.well-known/...` paths, so it cannot share a port behind a path prefix. Funnel opens a whole port to the internet, so never turn it on for a port that also serves tailnet-only apps.
 
-Then add `https://<your-device>.<tailnet>.ts.net:8443/mcp` as a custom connector in your AI app. Approve it after signing in with the owner password. Open the same origin in a browser to sign in to TheirCare and confirm reviews.
+Then add `https://<your-device>.<tailnet>.ts.net:8443/mcp` as a custom connector in your AI app. Approve it after signing in with Google. Open the same origin in a browser to sign in to TheirCare and confirm reviews.
 
 Without Docker: `npm run remote` with the same environment variables (`THEIRCARE_HOST`, `THEIRCARE_PORT` and `THEIRCARE_DATA_DIR` are optional).
 

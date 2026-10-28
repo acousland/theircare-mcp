@@ -8,23 +8,40 @@ import { createHash, randomBytes } from 'node:crypto';
 import { TheirCare } from '../src/portal.js';
 import { demoFetch } from '../src/demo.js';
 import { createRemote } from '../src/remote.js';
-import { hashPassword, verifyPassword } from '../src/owner.js';
 
-const PASSWORD='correct horse battery staple';
-const passwordHash=await hashPassword(PASSWORD);
-const REDIRECT='https://client.example/callback';
+const OWNER='owner@example.com', REDIRECT='https://client.example/callback';
+const google={clientId:'test-client.apps.googleusercontent.com',clientSecret:'test-secret',ownerEmail:OWNER};
+// Fake Google token endpoint: returns an ID token carrying whatever claims the test queued.
+let nextClaims=null, tokenRequests=[];
+const fakeGoogle=async(url,opts)=>{
+  tokenRequests.push({url,body:new URLSearchParams(opts.body)});
+  if(!nextClaims) return Response.json({error:'invalid_grant'},{status:400});
+  const part=o=>Buffer.from(JSON.stringify(o)).toString('base64url');
+  return Response.json({id_token:part({alg:'RS256'})+'.'+part(nextClaims)+'.sig'});
+};
 async function start(dataDir) {
   const srv=http.createServer();await new Promise(r=>srv.listen(0,'127.0.0.1',r));
   const base='http://localhost:'+srv.address().port;
   const portal=new TheirCare({fetchImpl:demoFetch()});portal.authenticated=true;
-  const remote=await createRemote({publicUrl:base,passwordHash,dataDir,portal});
+  const remote=await createRemote({publicUrl:base,google,dataDir,portal,fetchImpl:fakeGoogle});
   srv.on('request',remote.app);
   return {base,remote,close:()=>new Promise(r=>srv.close(r))};
 }
 const get=(url,opts={})=>fetch(url,{redirect:'manual',...opts});
 const postForm=(url,body,cookie)=>get(url,{method:'POST',body:new URLSearchParams(body),headers:{'Content-Type':'application/x-www-form-urlencoded',...(cookie&&{Cookie:cookie})}});
 const cookieOf=res=>res.headers.getSetCookie().map(c=>c.split(';')[0]).join('; ');
-async function signIn(base) {return cookieOf(await postForm(base+'/login',{password:PASSWORD,next:'/'}));}
+// Runs the Google sign-in round trip; claims(nonce) builds the ID token Google would return.
+async function googleSignIn(base,next='/',claims=nonce=>({iss:'https://accounts.google.com',aud:google.clientId,exp:Date.now()/1000+300,nonce,email:OWNER,email_verified:true})) {
+  const begin=await get(base+'/login?next='+encodeURIComponent(next));
+  const auth=new URL(begin.headers.get('location'));
+  assert.equal(auth.origin,'https://accounts.google.com');
+  assert.equal(auth.searchParams.get('redirect_uri'),base+'/login/google/callback');
+  nextClaims=claims(auth.searchParams.get('nonce'));
+  const res=await get(base+'/login/google/callback?'+new URLSearchParams({code:'google-code',state:auth.searchParams.get('state')}),{headers:{Cookie:cookieOf(begin)}});
+  nextClaims=null;
+  return {res,cookie:res.headers.getSetCookie().filter(c=>c.startsWith('tc_owner=')).map(c=>c.split(';')[0]).join('; ')};
+}
+async function signIn(base) {return (await googleSignIn(base)).cookie;}
 async function authorize(base,cookie,decision='approve') {
   const reg=await (await get(base+'/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_name:'Test client',redirect_uris:[REDIRECT],token_endpoint_auth_method:'none'})})).json();
   const verifier=randomBytes(32).toString('base64url'), challenge=createHash('sha256').update(verifier).digest('base64url');
@@ -40,10 +57,34 @@ async function authorize(base,cookie,decision='approve') {
 const token=(base,body)=>get(base+'/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(body)});
 const mcp=(base,access,body)=>get(base+'/mcp',{method:'POST',headers:{Authorization:'Bearer '+access,'Content-Type':'application/json',Accept:'application/json, text/event-stream'},body:JSON.stringify(body)});
 
-test('owner password hashes verify and reject wrong passwords',async()=>{
-  assert.ok(await verifyPassword(PASSWORD,passwordHash));
-  assert.equal(await verifyPassword('nope',passwordHash),false);
-  assert.ok(!passwordHash.includes('$'));
+test('Google sign-in admits only the verified owner email with a matching nonce',async()=>{
+  const dir=await mkdtemp(path.join(tmpdir(),'tc-remote-'));
+  const s=await start(dir);
+  try {
+    const base={iss:'https://accounts.google.com',aud:google.clientId,exp:Date.now()/1000+300,email:OWNER,email_verified:true};
+    tokenRequests=[];
+    const ok=await googleSignIn(s.base,'/oauth/consent?request=abc');
+    assert.equal(ok.res.status,303);assert.equal(ok.res.headers.get('location'),'/oauth/consent?request=abc');assert.ok(ok.cookie);
+    const sent=tokenRequests[0].body;
+    assert.equal(sent.get('client_secret'),'test-secret');assert.ok(sent.get('code_verifier'),'PKCE is used with Google');
+    for(const [why,claims] of [
+      ['other account',n=>({...base,nonce:n,email:'someone@example.com'})],
+      ['unverified email',n=>({...base,nonce:n,email_verified:false})],
+      ['wrong audience',n=>({...base,nonce:n,aud:'other-client'})],
+      ['wrong issuer',n=>({...base,nonce:n,iss:'https://evil.example'})],
+      ['expired',n=>({...base,nonce:n,exp:Date.now()/1000-10})],
+      ['replayed nonce',()=>({...base,nonce:'other'})]
+    ]) {
+      const bad=await googleSignIn(s.base,'/',claims);
+      assert.equal(bad.res.status,403,why);assert.equal(bad.cookie,'',why);
+    }
+    const begin=await get(s.base+'/login');
+    const state=new URL(begin.headers.get('location')).searchParams.get('state');
+    const noCookie=await get(s.base+'/login/google/callback?'+new URLSearchParams({code:'c',state}));
+    assert.equal(noCookie.status,403,'a sign-in started in another browser cannot be finished here');
+    const offsite=await googleSignIn(s.base,'//evil.example');
+    assert.equal(offsite.res.headers.get('location'),'/');
+  } finally {await s.remote.oauth.flush();await s.close();await rm(dir,{recursive:true,force:true});}
 });
 
 test('remote OAuth flow issues tokens that unlock MCP tools, and survive a restart',async()=>{
@@ -95,11 +136,7 @@ test('remote companion pages and consent require the owner sign-in',async()=>{
   try {
     const home=await get(s.base+'/');
     assert.equal(home.status,303);assert.equal(home.headers.get('location'),'/login');
-    const wrong=await postForm(s.base+'/login',{password:'wrong'});
-    assert.equal(wrong.status,401);assert.equal(cookieOf(wrong),'');
-    const offsite=await postForm(s.base+'/login',{password:PASSWORD,next:'//evil.example'});
-    assert.equal(offsite.headers.get('location'),'/');
-    const cookie=cookieOf(offsite);
+    const cookie=await signIn(s.base);
     const ui=await get(s.base+'/');
     const uiCookie=cookieOf(await get(s.base+'/',{headers:{Cookie:cookie}}));
     assert.equal(ui.status,303);
@@ -128,5 +165,5 @@ test('remote companion pages and consent require the owner sign-in',async()=>{
 });
 
 test('remote URL must be a bare origin',async()=>{
-  await assert.rejects(createRemote({publicUrl:'https://example.ts.net:8443/theircare',passwordHash,dataDir:tmpdir()}),/no path/);
+  await assert.rejects(createRemote({publicUrl:'https://example.ts.net:8443/theircare',google,dataDir:tmpdir()}),/no path/);
 });

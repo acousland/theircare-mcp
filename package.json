@@ -14,8 +14,7 @@
     "config": "node src/config.js",
     "check": "node scripts/check.js",
     "test:mcp": "node test/mcp-smoke.js",
-    "remote": "node src/remote.js",
-    "owner-password": "node src/owner-password.js"
+    "remote": "node src/remote.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

@@ -17,21 +17,23 @@ const safeNext=n=>typeof n==='string'&&n.startsWith('/')&&!n.startsWith('//')&&!
 
 // Remote mode: the companion, an OAuth authorization server and a Streamable HTTP MCP endpoint on one origin.
 // publicUrl is the HTTPS origin the proxy (e.g. Tailscale Funnel) serves at its root.
-export async function createRemote({publicUrl,passwordHash,dataDir,portal=new TheirCare()}) {
+// google: {clientId, clientSecret, ownerEmail}; only ownerEmail can sign in.
+export async function createRemote({publicUrl,google,dataDir,portal=new TheirCare(),fetchImpl=fetch}) {
   const origin=new URL(publicUrl);
   if(origin.origin!==publicUrl.replace(/\/$/,'')) throw Error('THEIRCARE_PUBLIC_URL must be an origin with no path, e.g. https://homeserver.example.ts.net:8443');
   const resource=new URL('/mcp',origin);
-  const owner=createOwner({passwordHash,secure:origin.protocol==='https:'});
+  const owner=createOwner({...google,redirectUri:new URL('/login/google/callback',origin).href,secure:origin.protocol==='https:',fetchImpl});
   const oauth=await createOAuthProvider({dataDir,resource});
   const form=express.urlencoded({extended:false,limit:'8kb'});
   function routes(app,{run}) {
     app.use(mcpAuthRouter({provider:oauth.provider,issuerUrl:origin,resourceServerUrl:resource,resourceName:'TheirCare',scopesSupported:['theircare']}));
-    app.get('/login',(req,res)=>res.type('html').send(page('Sign in',loginForm(req.query.next))));
-    app.post('/login',form,async(req,res)=>{
-      const result=await owner.login(res,req.body.password);
-      if(result.ok) return res.redirect(303,safeNext(req.body.next));
-      res.status(result.locked?429:401).type('html').send(page('Sign in',
-        '<p class="error">'+(result.locked?'Too many attempts. Try again in 15 minutes.':'That password was not accepted.')+'</p>'+loginForm(req.body.next)));
+    app.get('/login',(req,res)=>owner.start(res,safeNext(req.query.next)));
+    app.get('/login/google/callback',async(req,res,next)=>{
+      try {
+        const result=await owner.finish(req,res);
+        if(result.ok) return res.redirect(303,safeNext(result.next));
+        res.status(403).type('html').send(page('Not signed in','<p class="error">'+esc(result.error)+'</p><p><a class="primary" href="/login">Try again</a></p>'));
+      } catch(e) {next(e);}
     });
     app.get('/oauth/consent',(req,res)=>{
       const next='/oauth/consent?request='+encodeURIComponent(String(req.query.request||''));
@@ -70,8 +72,6 @@ export async function createRemote({publicUrl,passwordHash,dataDir,portal=new Th
     });
     app.all('/mcp',bearer,(req,res)=>res.status(405).set('Allow','POST').json({jsonrpc:'2.0',error:{code:-32000,message:'Method not allowed.'},id:null}));
   }
-  const loginForm=next=>'<span class="eyebrow">Owner sign-in</span><h2>Unlock the companion</h2><p class="muted">Use the owner password set on the server. This is not your TheirCare password.</p>'+
-    '<form id="login" method="post" action="/login"><input type="hidden" name="next" value="'+esc(safeNext(next))+'"><label>Owner password<input name="password" type="password" autocomplete="current-password" required autofocus></label><button class="primary">Continue <span>→</span></button></form>';
   const companion=createCompanion({portal,origin:origin.origin,remote:{owner,routes}});
   return {...companion,oauth,owner};
 }
@@ -79,7 +79,8 @@ export async function createRemote({publicUrl,passwordHash,dataDir,portal=new Th
 if(process.argv[1]===path.join(ROOT,'src/remote.js')) {
   const env=process.env, need=name=>env[name]||(console.error('Missing '+name+'. See .env.example.'),process.exit(1));
   try {
-    const {app}=await createRemote({publicUrl:need('THEIRCARE_PUBLIC_URL'),passwordHash:need('THEIRCARE_OWNER_PASSWORD_HASH'),dataDir:env.THEIRCARE_DATA_DIR||path.join(ROOT,'.runtime')});
+    const {app}=await createRemote({publicUrl:need('THEIRCARE_PUBLIC_URL'),dataDir:env.THEIRCARE_DATA_DIR||path.join(ROOT,'.runtime'),
+      google:{clientId:need('GOOGLE_CLIENT_ID'),clientSecret:need('GOOGLE_CLIENT_SECRET'),ownerEmail:need('THEIRCARE_OWNER_EMAIL')}});
     const host=env.THEIRCARE_HOST||'127.0.0.1', port=Number(env.THEIRCARE_PORT||43817);
     const server=app.listen(port,host,()=>console.error('TheirCare remote companion listening on '+host+':'+port+' for '+env.THEIRCARE_PUBLIC_URL));
     server.on('error',err=>{console.error('Remote startup failed: '+err.code);process.exitCode=1;});
