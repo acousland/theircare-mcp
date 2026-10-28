@@ -113,11 +113,11 @@ Docker on a home server with [Tailscale Funnel](https://tailscale.com/kb/1223/fu
     cp .env.example .env            # public URL, Google client ID/secret, owner email
     mkdir -p data
     docker compose up -d --build
-    sudo tailscale funnel --bg --https=8443 http://127.0.0.1:43817
+    sudo tailscale funnel --bg --https=443 http://127.0.0.1:43817
 
 The container publishes only on `127.0.0.1`. Funnel must be allowed for the device in your tailnet policy. Serve TheirCare at the **root of its own Funnel port**: OAuth discovery uses `/.well-known/...` paths, so it cannot share a port behind a path prefix. Funnel opens a whole port to the internet, so never turn it on for a port that also serves tailnet-only apps.
 
-Then add `https://<your-device>.<tailnet>.ts.net:8443/mcp` as a custom connector in your AI app. Approve it after signing in with Google. Open the same origin in a browser to sign in to TheirCare and confirm reviews.
+Use port 443: Claude.ai's connector service did not reach Funnel on port 8443. Then add `https://<your-device>.<tailnet>.ts.net/mcp` as a custom connector in your AI app. Approve it after signing in with Google. Open the same origin in a browser to sign in to TheirCare and confirm reviews.
 
 Without Docker: `npm run remote` with the same environment variables (`THEIRCARE_HOST`, `THEIRCARE_PORT` and `THEIRCARE_DATA_DIR` are optional).
 

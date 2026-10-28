@@ -20,7 +20,7 @@ const safeNext=n=>typeof n==='string'&&n.startsWith('/')&&!n.startsWith('//')&&!
 // google: {clientId, clientSecret, ownerEmail}; only ownerEmail can sign in.
 export async function createRemote({publicUrl,google,dataDir,portal=new TheirCare(),fetchImpl=fetch}) {
   const origin=new URL(publicUrl);
-  if(origin.origin!==publicUrl.replace(/\/$/,'')) throw Error('THEIRCARE_PUBLIC_URL must be an origin with no path, e.g. https://homeserver.example.ts.net:8443');
+  if(origin.origin!==publicUrl.replace(/\/$/,'')) throw Error('THEIRCARE_PUBLIC_URL must be an origin with no path, e.g. https://homeserver.example.ts.net');
   const resource=new URL('/mcp',origin);
   const owner=createOwner({...google,redirectUri:new URL('/login/google/callback',origin).href,secure:origin.protocol==='https:',fetchImpl});
   const oauth=await createOAuthProvider({dataDir,resource});

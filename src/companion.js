@@ -19,7 +19,7 @@ export function createCompanion({portal=new TheirCare(),token=randomBytes(32).to
     app.get('/healthz',(req,res)=>res.json({ok:true}));
     // Access log without query strings, which can carry OAuth codes.
     app.use((req,res,next)=>{
-      res.on('finish',()=>console.error([new Date().toISOString(),req.method,req.path,res.statusCode,req.headers.host,JSON.stringify(req.headers['user-agent']||'')].join(' ')));
+      res.on('finish',()=>console.error([new Date().toISOString(),req.method,req.originalUrl.split('?')[0],res.statusCode,req.headers.host,JSON.stringify(req.headers['user-agent']||'')].join(' ')));
       next();
     });
   }
