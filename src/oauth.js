@@ -1,8 +1,10 @@
 import { randomBytes, randomUUID, createHash, createCipheriv, createDecipheriv } from 'node:crypto';
 import { readFile, writeFile, rename, mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { InvalidGrantError, InvalidTokenError, InvalidTargetError, InvalidScopeError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
-const SCOPE='theircare', MAX_CLIENTS=50;
+import { InvalidGrantError, InvalidTokenError, InvalidTargetError, InvalidScopeError, InvalidClientMetadataError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+const SCOPE='theircare', MAX_CLIENTS=50, REUSE_GRACE=2*60000, REUSE_MEMORY_DAYS=30;
+// Redirect URIs of the AI apps that may connect. An entry ending in / allows any path below it.
+export const DEFAULT_REDIRECTS=['https://chatgpt.com/connector/oauth/','https://claude.ai/api/mcp/auth_callback','https://claude.com/api/mcp/auth_callback'];
 const digest=s=>createHash('sha256').update(String(s)).digest('base64url');
 const secret=()=>randomBytes(32).toString('base64url');
 const sameResource=(a,b)=>String(a).replace(/#.*$/,'').replace(/\/$/,'')===String(b).replace(/#.*$/,'').replace(/\/$/,'');
@@ -19,7 +21,13 @@ function unseal(key,box) {
 const keyOf=token=>{const k=Buffer.from(String(token).split('.')[1]||'','base64url');return k.length===32?k:null;};
 // OAuth 2.1 authorization server for one owner. Registered clients, hashed tokens and sealed vaults persist in
 // <dataDir>/oauth.json so connectors survive restarts; codes and pending consents stay in memory.
-export async function createOAuthProvider({dataDir,resource,now=Date.now,accessSeconds=3600,refreshDays=365}) {
+// Only clients whose redirect URIs are in allowedRedirects can register or be authorized, so a look-alike app
+// cannot send the owner a genuine approval link that hands their TheirCare sign-in to someone else.
+export async function createOAuthProvider({dataDir,resource,now=Date.now,accessSeconds=3600,refreshDays=365,allowedRedirects=DEFAULT_REDIRECTS}) {
+  const allowedRedirect=uri=>{
+    let href;try {href=new URL(uri).href;} catch {return false;}
+    return allowedRedirects.some(a=>href===a||(a.endsWith('/')&&href.startsWith(a)));
+  };
   const file=path.join(dataDir,'oauth.json');
   let state={clients:{},tokens:{},vaults:{}};
   try {state={...state,...JSON.parse(await readFile(file,'utf8'))};} catch(e) {if(e.code!=='ENOENT') throw e;}
@@ -29,7 +37,7 @@ export async function createOAuthProvider({dataDir,resource,now=Date.now,accessS
   let writing=Promise.resolve();
   function save() {
     for(const [k,t] of Object.entries(state.tokens)) if(t.expires<=now()) delete state.tokens[k];
-    const used=new Set([...Object.values(state.tokens),...codes.values()].map(t=>t.vault));
+    const used=new Set([...Object.values(state.tokens).filter(t=>t.type!=='used'),...codes.values()].map(t=>t.vault));
     for(const v of Object.keys(state.vaults)) if(!used.has(v)) delete state.vaults[v];
     const body=JSON.stringify(state);
     writing=writing.then(async()=>{
@@ -50,6 +58,7 @@ export async function createOAuthProvider({dataDir,resource,now=Date.now,accessS
   const clientsStore={
     getClient:id=>state.clients[id],
     async registerClient(client) {
+      if(!client.redirect_uris?.length||!client.redirect_uris.every(allowedRedirect)) throw new InvalidClientMetadataError('This server only accepts connections from its allowed AI apps.');
       // Registration is open (MCP clients self-register), so bound it; consent still needs the owner's TheirCare sign-in.
       const ids=Object.keys(state.clients);
       if(ids.length>=MAX_CLIENTS) {
@@ -67,6 +76,7 @@ export async function createOAuthProvider({dataDir,resource,now=Date.now,accessS
     // Park the request and send the browser to the consent page, which requires the owner's TheirCare sign-in.
     async authorize(client,params,res) {
       if(params.resource && !sameResource(params.resource,resource)) throw new InvalidTargetError('This server only issues tokens for '+resource.href);
+      if(!allowedRedirect(params.redirectUri)) throw new InvalidClientMetadataError('This server only accepts connections from its allowed AI apps.');
       const scopes=params.scopes?.length?params.scopes:[SCOPE];
       if(scopes.some(s=>s!==SCOPE)) throw new InvalidScopeError('Only the '+SCOPE+' scope is supported.');
       for(const [k,p] of pending) if(p.expires<=now()) pending.delete(k);
@@ -88,10 +98,16 @@ export async function createOAuthProvider({dataDir,resource,now=Date.now,accessS
     },
     async exchangeRefreshToken(client,refresh,scopes,requested) {
       const key=digest(refresh), t=state.tokens[key], vaultKey=keyOf(refresh);
+      // A rotated refresh token presented again means two parties hold the connection's tokens, so end it.
+      // A quick repeat is more likely the client retrying a refresh whose response it lost, so it is only refused.
+      if(t?.type==='used') {
+        if(now()-t.at>REUSE_GRACE) {console.error('Refresh token reused; ending that connection');await forget(t.vault);}
+        throw new InvalidGrantError('Invalid or expired refresh token.');
+      }
       if(!t||t.type!=='refresh'||t.clientId!==client.client_id||t.expires<=now()||!vaultKey||!state.vaults[t.vault]) throw new InvalidGrantError('Invalid or expired refresh token.');
       if(scopes?.some(s=>!t.scopes.includes(s))) throw new InvalidScopeError('Cannot widen scopes on refresh.');
       if(requested && !sameResource(requested,resource)) throw new InvalidTargetError('This server only issues tokens for '+resource.href);
-      delete state.tokens[key];
+      state.tokens[key]={type:'used',vault:t.vault,at:now(),expires:now()+REUSE_MEMORY_DAYS*86400000};
       return issue(client.client_id,scopes?.length?scopes:t.scopes,t.resource,t.vault,vaultKey);
     },
     async verifyAccessToken(token) {

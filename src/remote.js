@@ -18,13 +18,13 @@ const FAILURE_WINDOW=15*60000, MAX_FAILURES=5;
 // Connecting an AI app asks for the owner's TheirCare sign-in; it is sealed with a key held only in that app's tokens,
 // so the server can sign back in whenever TheirCare ends the session (idle timeout, or a sign-in elsewhere).
 // publicUrl is the HTTPS origin the proxy (e.g. Tailscale Funnel) serves at its root. Only ownerEmail can connect.
-export async function createRemote({publicUrl,ownerEmail,dataDir,portal=new TheirCare(),now=Date.now}) {
+export async function createRemote({publicUrl,ownerEmail,dataDir,portal=new TheirCare(),now=Date.now,allowedRedirects}) {
   const origin=new URL(publicUrl);
   if(origin.origin!==publicUrl.replace(/\/$/,'')) throw Error('THEIRCARE_PUBLIC_URL must be an origin with no path, e.g. https://homeserver.example.ts.net');
   if(!/^[^@\s]+@[^@\s]+$/.test(ownerEmail||'')) throw Error('THEIRCARE_OWNER_EMAIL must be your TheirCare sign-in email.');
   const resource=new URL('/mcp',origin), host=origin.host, secure=origin.protocol==='https:';
   const metadataUrl=getOAuthProtectedResourceMetadataUrl(resource);
-  const oauth=await createOAuthProvider({dataDir,resource,now});
+  const oauth=await createOAuthProvider({dataDir,resource,now,allowedRedirects});
   // Without a review page, saving through the AI app (after agreement in chat) is the only way to save.
   const {ops}=createOps({portal,allowAiSave:true,status:()=>({remote:true})});
   const app=express(), form=express.urlencoded({extended:false,limit:'8kb'});
@@ -122,7 +122,7 @@ export async function createRemote({publicUrl,ownerEmail,dataDir,portal=new Thei
     const creds=oauth.credentials(req.auth.token);
     if(!creds) return res.status(401).set('WWW-Authenticate','Bearer error="invalid_token", resource_metadata="'+metadataUrl+'"').json({error:'invalid_token'});
     // Stateless: one server and transport per request.
-    const server=new McpServer({name:'theircare',version:'1.0.0'});
+    const server=new McpServer({name:'theircare',version:'1.0.1'});
     registerTools(server,async(op,args)=>{
       try {const data=await run(creds,op,args);console.error('tool '+op+' ok');return {data,ok:true};}
       catch(e) {const data=errorBody(e);console.error('tool '+op+' failed: '+data.code);return {data,ok:false};}
@@ -140,7 +140,8 @@ export async function createRemote({publicUrl,ownerEmail,dataDir,portal=new Thei
 if(process.argv[1]===path.join(ROOT,'src/remote.js')) {
   const env=process.env, need=name=>env[name]||(console.error('Missing '+name+'. See .env.example.'),process.exit(1));
   try {
-    const {app}=await createRemote({publicUrl:need('THEIRCARE_PUBLIC_URL'),ownerEmail:need('THEIRCARE_OWNER_EMAIL'),dataDir:env.THEIRCARE_DATA_DIR||path.join(ROOT,'.runtime')});
+    const allowedRedirects=env.THEIRCARE_ALLOWED_REDIRECTS?.split(',').map(s=>s.trim()).filter(Boolean);
+    const {app}=await createRemote({publicUrl:need('THEIRCARE_PUBLIC_URL'),ownerEmail:need('THEIRCARE_OWNER_EMAIL'),dataDir:env.THEIRCARE_DATA_DIR||path.join(ROOT,'.runtime'),allowedRedirects});
     const host=env.THEIRCARE_HOST||'127.0.0.1', port=Number(env.THEIRCARE_PORT||43817);
     const server=app.listen(port,host,()=>console.error('TheirCare remote connector listening on '+host+':'+port+' for '+env.THEIRCARE_PUBLIC_URL));
     server.on('error',err=>{console.error('Remote startup failed: '+err.code);process.exitCode=1;});

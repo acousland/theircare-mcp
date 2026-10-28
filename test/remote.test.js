@@ -9,7 +9,7 @@ import { TheirCare } from '../src/portal.js';
 import { demoFetch } from '../src/demo.js';
 import { createRemote } from '../src/remote.js';
 
-const OWNER='owner@example.com', PASSWORD='correct horse', REDIRECT='https://client.example/callback';
+const OWNER='owner@example.com', PASSWORD='correct horse', REDIRECT='https://chatgpt.com/connector/oauth/test-connector';
 // Fake TheirCare with real sign-in and one session per account: end() is a sign-in elsewhere or an idle timeout.
 function fakeTheirCare() {
   const demo=demoFetch({allowSave:true}), t={password:PASSWORD,live:false,logins:0,attempts:0,commits:0};
@@ -29,10 +29,10 @@ function fakeTheirCare() {
   t.end=()=>{t.live=false;};
   return t;
 }
-async function start(dataDir,{tc=fakeTheirCare(),port=0}={}) {
+async function start(dataDir,{tc=fakeTheirCare(),port=0,now=Date.now}={}) {
   const srv=http.createServer();await new Promise(r=>srv.listen(port,'127.0.0.1',r));
   const base='http://localhost:'+srv.address().port;
-  const remote=await createRemote({publicUrl:base,ownerEmail:OWNER,dataDir,portal:new TheirCare({fetchImpl:tc.fetch})});
+  const remote=await createRemote({publicUrl:base,ownerEmail:OWNER,dataDir,now,portal:new TheirCare({fetchImpl:tc.fetch})});
   srv.on('request',remote.app);
   return {base,remote,tc,close:async()=>{await remote.oauth.flush();await new Promise(r=>srv.close(r));}};
 }
@@ -180,6 +180,39 @@ test('the consent page admits only the owner, binds to the browser and limits fa
     const withHost=(p,host)=>new Promise((resolve,reject)=>http.get(s.base+p,{headers:{Host:host}},res=>{res.resume();resolve(res.statusCode);}).on('error',reject));
     assert.equal(await withHost('/','evil.example'),403);
     assert.equal(await withHost('/healthz','127.0.0.1:43817'),200);
+  } finally {await s.close();}
+}));
+
+test('only allowed AI apps can register, so approval links cannot send the sign-in elsewhere',withDir(async dir=>{
+  const s=await start(dir);
+  try {
+    const register=redirect_uris=>get(s.base+'/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_name:'ChatGPT',redirect_uris,token_endpoint_auth_method:'none'})});
+    for(const uris of [['https://evil.example/callback'],['https://chatgpt.com.evil.example/connector/oauth/x'],['https://chatgpt.com/connector/oauth/../../evil'],[REDIRECT,'https://evil.example/cb'],['https://chatgpt.com/other']]) {
+      const res=await register(uris);
+      assert.equal(res.status,400,uris.join(' '));assert.equal((await res.json()).error,'invalid_client_metadata');
+    }
+    assert.equal((await register([REDIRECT])).status,201);
+    assert.equal((await register(['https://claude.ai/api/mcp/auth_callback'])).status,201);
+  } finally {await s.close();}
+}));
+
+test('a reused refresh token ends the connection, except for a quick retry',withDir(async dir=>{
+  let clock=Date.now();
+  const s=await start(dir,{now:()=>clock});
+  try {
+    const c=await connect(s.base);
+    const refresh=t=>token(s.base,{grant_type:'refresh_token',client_id:c.client.client_id,refresh_token:t});
+    const first=await (await refresh(c.tokens.refresh_token)).json();
+    assert.ok(first.refresh_token);
+    assert.equal((await refresh(c.tokens.refresh_token)).status,400,'a quick retry is refused');
+    const second=await (await refresh(first.refresh_token)).json();
+    assert.ok(second.access_token,'and the connection carries on');
+    clock+=5*60000;
+    assert.equal((await refresh(first.refresh_token)).status,400);
+    assert.equal((await tools(s.base,second.access_token)('theircare_status')).status,401,'a later reuse revokes every token');
+    assert.equal((await refresh(second.refresh_token)).status,400);
+    await s.remote.oauth.flush();
+    assert.deepEqual(JSON.parse(await readFile(path.join(dir,'oauth.json'),'utf8')).vaults,{});
   } finally {await s.close();}
 }));
 
