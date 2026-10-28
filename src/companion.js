@@ -4,71 +4,55 @@ import path from 'node:path';
 import { TheirCare, PortalError } from './portal.js';
 import { ROOT, writeConnection, readConnection } from './runtime.js';
 import { demoFetch } from './demo.js';
-import { readCookie } from './owner.js';
 
 export const errorBody=err=>err instanceof PortalError?{error:err.message,code:err.code}:{error:'The companion encountered an error.',code:'INTERNAL_ERROR'};
+export const readCookie=(req,name)=>(req.headers.cookie||'').split(';').map(s=>s.trim()).find(s=>s.startsWith(name+'='))?.slice(name.length+1);
 
-// remote: {owner, routes(app)} when served behind an HTTPS proxy. owner gates every human page and UI call.
 // allowAiSave lets MCP clients confirm previews (THEIRCARE_ALLOW_AI_SAVE=true); otherwise only the human UI can save.
 export const aiSaveEnabled=()=>process.env.THEIRCARE_ALLOW_AI_SAVE==='true';
-export function createCompanion({portal=new TheirCare(),token=randomBytes(32).toString('hex'),origin='http://127.0.0.1:43817',remote=null,allowAiSave=aiSaveEnabled()}={}) {
-  const app=express(), uiToken=randomBytes(32).toString('hex'), host=new URL(origin).host;
-  let demo=false, keepAliveUntil=0;
-  const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
-  app.disable('x-powered-by');
-  if(remote) {
-    app.set('trust proxy',1);
-    app.get('/healthz',(req,res)=>res.json({ok:true}));
-    // Access log without query strings, which can carry OAuth codes.
-    app.use((req,res,next)=>{
-      res.on('finish',()=>console.error([new Date().toISOString(),req.method,req.originalUrl.split('?')[0],res.statusCode,req.headers.host,JSON.stringify(req.headers['user-agent']||'')].join(' ')));
-      next();
-    });
-  }
-  app.use((req,res,next)=>{
-    // Proxies may forward the public name in X-Forwarded-Host. This is DNS-rebinding defence, not authentication.
-    if(req.headers.host!==host && !(remote && req.headers['x-forwarded-host']===host)) return res.status(403).json({error:'Invalid host.'});
-    res.set({'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer',
-      'Content-Security-Policy':"default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});
-    if(remote) res.set('Strict-Transport-Security','max-age=31536000');
-    next();
-  });
-  app.use(express.json({limit:'32kb'}));
+// Tool operations shared by the local companion and remote mode. reviewUrl is the human review page, if there is one.
+export function createOps({portal,allowAiSave,reviewUrl=null,isDemo=()=>false,status=()=>({})}) {
   // Same checks for the human UI and, when enabled, MCP clients: explicit terms acceptance, never in sample mode.
   // portal.confirm re-runs the review, refuses changed fees/terms, submits once and verifies the saved calendar.
   function confirm(body,human) {
     if(!human&&!allowAiSave) throw new PortalError('Review and accept the terms yourself in the companion.','HUMAN_CONFIRMATION_REQUIRED');
     if(body?.accept_terms!==true) throw new PortalError(human?'Review and accept the terms yourself in the companion.':'Confirm only after the user accepts the terms; pass accept_terms: true.','HUMAN_CONFIRMATION_REQUIRED');
-    if(demo) throw new PortalError('Sample mode cannot save real bookings.','DEMO_ONLY');
+    if(isDemo()) throw new PortalError('Sample mode cannot save real bookings.','DEMO_ONLY');
     return portal.confirm(String(body.id||''));
   }
+  const note='Not saved. Show the user these exact changes, fees, cancellation policy and terms. Only after they explicitly agree, call theircare_confirm_changes with this id'+(reviewUrl?', or they can confirm at review_url.':'.');
   const ops={
-    status:()=>({signed_in:portal.authenticated,demo,companion_url:origin,ai_can_save:allowAiSave,...(remote&&{remote:true})}),
+    status:()=>({signed_in:portal.authenticated,demo:isDemo(),ai_can_save:allowAiSave,...status()}),
     context:()=>portal.context(),
     bookings:args=>portal.bookings(args),
     availability:args=>portal.availability(args),
-    preview:async args=>({...await portal.previewChanges(args),review_url:origin+'/#review',
-      ...(allowAiSave&&{note:'Not saved. Show the user these exact changes, fees, cancellation policy and terms. Only after they explicitly agree, call theircare_confirm_changes with this id, or they can confirm at review_url.'})}),
+    preview:async args=>({...await portal.previewChanges(args),...(reviewUrl&&{review_url:reviewUrl}),...(allowAiSave&&{note})}),
     discard:()=>{portal.preview=null;return {discarded:true};},
     confirm:args=>confirm(args,false)
   };
-  const run=(op,args)=>portal.serial(()=>ops[op](args));
-  remote?.routes(app,{run});
-  if(remote) {
-    // TheirCare signs idle sessions out quickly. Remotely, refresh it for up to 12 hours after each sign-in.
-    portal.onSessionLost=d=>console.error('TheirCare session ended: '+JSON.stringify(d));
-    setInterval(()=>{
-      if(!portal.authenticated||demo||Date.now()>keepAliveUntil) return;
-      portal.serial(()=>portal.request('/family/dashboard')).catch(e=>console.error('TheirCare keep-alive: '+(e.code||'error')));
-    },2*60000).unref();
-  }
+  return {ops,confirm};
+}
+
+export function createCompanion({portal=new TheirCare(),token=randomBytes(32).toString('hex'),origin='http://127.0.0.1:43817',allowAiSave=aiSaveEnabled()}={}) {
+  const app=express(), uiToken=randomBytes(32).toString('hex'), host=new URL(origin).host;
+  let demo=false;
+  const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
+  app.disable('x-powered-by');
+  app.use((req,res,next)=>{
+    // DNS-rebinding defence, not authentication.
+    if(req.headers.host!==host) return res.status(403).json({error:'Invalid host.'});
+    res.set({'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer',
+      'Content-Security-Policy':"default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});
+    next();
+  });
+  app.use(express.json({limit:'32kb'}));
+  const {ops,confirm}=createOps({portal,allowAiSave,reviewUrl:origin+'/#review',isDemo:()=>demo,status:()=>({companion_url:origin})});
   app.use('/api',(req,res,next)=>{
-    const bearer=!remote&&equal(req.headers.authorization,'Bearer '+token);
-    // Remotely the persisted owner session replaces the per-process UI cookie, so restarts do not break open pages.
-    // The custom header still forces a CORS preflight, and the SameSite=Lax session is not sent on cross-site POSTs.
-    const ui=req.headers['x-theircare-ui']==='1'&&(remote?!!remote.owner.check(req):equal(readCookie(req,'tc_ui'),uiToken));
+    const bearer=equal(req.headers.authorization,'Bearer '+token);
+    // The custom header forces a CORS preflight; the cookie is SameSite=Strict.
+    const ui=req.headers['x-theircare-ui']==='1'&&equal(readCookie(req,'tc_ui'),uiToken);
     if(req.headers.origin && req.headers.origin!==origin) return res.status(403).json({error:'Cross-site request blocked.'});
-    if(!bearer&&!ui) return res.status(401).json({error:remote?'Sign in to the companion again.':'Local authorization required.'});
+    if(!bearer&&!ui) return res.status(401).json({error:'Local authorization required.'});
     req.isHumanUI=ui;
     next();
   });
@@ -79,7 +63,7 @@ export function createCompanion({portal=new TheirCare(),token=randomBytes(32).to
   app.post('/api/login',route(async req=>{
     if(!req.isHumanUI) throw new PortalError('Sign in personally in the companion.','UI_REQUIRED');
     portal.fetchImpl=fetch; demo=false;
-    try {const result=await portal.login(String(req.body.email||''),String(req.body.password||''));keepAliveUntil=Date.now()+12*3600000;return result;}
+    try {return await portal.login(String(req.body.email||''),String(req.body.password||''));}
     finally {if(req.body) {req.body.password='';req.body.email='';}}
   }));
   app.post('/api/demo',route(req=>{
@@ -101,15 +85,14 @@ export function createCompanion({portal=new TheirCare(),token=randomBytes(32).to
   app.post('/api/discard',route(()=>ops.discard()));
   app.post('/api/confirm',route(req=>confirm(req.body,req.isHumanUI)));
   app.get('/',(req,res)=>{
-    if(remote && !remote.owner.check(req)) return res.redirect(303,'/login');
-    res.cookie('tc_ui',uiToken,{httpOnly:true,sameSite:'strict',path:'/',secure:!!remote});
+    res.cookie('tc_ui',uiToken,{httpOnly:true,sameSite:'strict',path:'/'});
     res.sendFile(path.join(ROOT,'public/index.html'));
   });
   app.use(express.static(path.join(ROOT,'public'),{index:false}));
   app.use((err,req,res,next)=>{
     res.status(err instanceof PortalError?400:500).json(errorBody(err));
   });
-  return {app,portal,token,run};
+  return {app,portal,token};
 }
 if(process.argv[1]===path.join(ROOT,'src/companion.js')) {
   let previousToken;

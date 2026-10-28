@@ -26,7 +26,7 @@ function options(id,items){$(id).innerHTML=items.map(x=>'<option value="'+esc(x.
 async function connected() {
   const status=await api('status');
   state.demo=status.demo;
-  $('badge').textContent=status.demo?'Sample mode':status.signed_in?'Connected · '+(status.remote?'Home server':'This Mac'):status.remote?'Home server':'Local prototype';
+  $('badge').textContent=status.demo?'Sample mode':status.signed_in?'Connected · This Mac':'Local prototype';
   $('welcome').hidden=status.signed_in;$('workspace').hidden=!status.signed_in;$('logout').hidden=!status.signed_in;
   $('demo-banner').hidden=!status.demo;
   if(!status.signed_in) return;

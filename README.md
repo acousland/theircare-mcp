@@ -72,13 +72,13 @@ The assistant should first call account_context for current child, service and c
 | theircare_availability | Availability and session conditions |
 | theircare_preview_changes | Unsaved booking, cancellation or waitlist review |
 | theircare_discard_preview | Discard the preview |
-| theircare_confirm_changes | Save the active preview (only when `THEIRCARE_ALLOW_AI_SAVE=true`) |
+| theircare_confirm_changes | Save the active preview (when `THEIRCARE_ALLOW_AI_SAVE=true`, and always in remote mode) |
 
 Date ranges use **inclusive start / exclusive end**, up to 93 days. Previews support 1–31 dates for one child, care type and calendar year.
 
 By default there is **no MCP tool for final saving or accepting terms**. You confirm personally in the companion.
 
-To let your assistant book and cancel directly, set `THEIRCARE_ALLOW_AI_SAVE=true` in the environment of the MCP server (or in `.env` for remote mode). This adds `theircare_confirm_changes`, which saves a preview after you agree in chat. The assistant then accepts TheirCare's booking terms on your behalf, and that may incur fees. The tool is marked destructive, so clients that support it ask before running it. It requires `accept_terms: true`, never works in sample mode, and uses the same re-check, single submit and calendar verification as the companion. One preview is active at a time, expiring after five minutes. Before saving, the adapter refreshes availability and review; changed fees/terms/state invalidate the old preview. It submits once, then checks the saved calendar. Check bookings before retrying an uncertain result.
+To let your assistant book and cancel directly, set `THEIRCARE_ALLOW_AI_SAVE=true` in the environment of the MCP server (remote mode always allows it). This adds `theircare_confirm_changes`, which saves a preview after you agree in chat. The assistant then accepts TheirCare's booking terms on your behalf, and that may incur fees. The tool is marked destructive, so clients that support it ask before running it. It requires `accept_terms: true`, never works in sample mode, and uses the same re-check, single submit and calendar verification as the companion. One preview is active at a time, expiring after five minutes. Before saving, the adapter refreshes availability and review; changed fees/terms/state invalidate the old preview. It submits once, then checks the saved calendar. Check bookings before retrying an uncertain result.
 
 ## Privacy and local operation
 
@@ -99,29 +99,28 @@ An enabled MCP client can restart the companion; remove/disable its registration
 
 ## Remote hosting (optional)
 
-Remote mode runs the companion, an OAuth 2.1 authorization server and a **Streamable HTTP** MCP endpoint (`/mcp`) on one HTTPS origin. Use it to connect web or mobile assistants (such as Claude.ai custom connectors) from anywhere. It is opt-in; the local stdio setup above is unchanged.
+Remote mode runs an OAuth 2.1 authorization server and a **Streamable HTTP** MCP endpoint (`/mcp`) on one HTTPS origin, with no companion page. Use it to connect web or mobile assistants (such as ChatGPT or Claude.ai custom connectors) from anywhere, and sign in once. It is opt-in; the local stdio setup above is unchanged.
 
 What changes in remote mode:
 
-- **Sign in with Google** protects the companion and every OAuth approval. Only the one verified address in `THEIRCARE_OWNER_EMAIL` is let in.
-- AI apps register themselves, then you approve each one in the companion. Access tokens last 1 hour, and refresh tokens last 30 days and rotate on each use. Tokens are stored hashed in `data/oauth.json`. Delete that file to revoke every connection.
-- The local bridge token is disabled. Final saving stays in the companion unless you opt in with `THEIRCARE_ALLOW_AI_SAVE=true`; the consent page then says the app can book and cancel.
-- Google sign-ins last 30 days and are stored hashed in `data/sessions.json`, so restarts keep you signed in.
-- Your TheirCare session stays in memory, so after a restart you sign in to TheirCare again. The server keeps it from idling out for up to 12 hours after each TheirCare sign-in.
-
-Create a Google OAuth client first. In [Google Cloud Console](https://console.cloud.google.com/apis/credentials), set up the OAuth consent screen (External, Testing, with your address as a test user). Then create an **OAuth client ID** of type **Web application**, with the authorized redirect URI `<THEIRCARE_PUBLIC_URL>/login/google/callback`. Only the `openid` and `email` scopes are requested.
+- **Connecting is signing in to TheirCare.** When you add the connector, its approval page asks for your TheirCare email and password and checks them with TheirCare. Only the account in `THEIRCARE_OWNER_EMAIL` is accepted, and five failed attempts lock the page for 15 minutes.
+- **You stay signed in.** Your TheirCare sign-in is sealed with AES-256-GCM in `data/oauth.json`. The key is not stored on the server: it travels inside the AI app's tokens, so the server can unlock it only while that app is using a tool. Whenever TheirCare ends the session (it signs out idle sessions within minutes, and allows only one session per account, so signing in on the website ends the connector's), the server signs back in on the next tool call. Your browser session on the website may end in turn if you use both at once.
+- **If TheirCare rejects the saved password** (for example after you change it), the server tries once, then drops that connection so your AI app asks you to reconnect, rather than retrying and risking an account lock.
+- **Booking and cancelling go through the AI app**, after you agree in chat, because there is no review page. `theircare_confirm_changes` is always available remotely, and the approval page says so.
+- Access tokens last 1 hour; refresh tokens last a year and rotate on each use, so a connector used at least once a year never expires. Tokens are stored hashed. Disconnect the app to revoke it, or delete `data/oauth.json` to revoke every connection and its sealed sign-in.
+- Anyone holding the AI app's tokens can use your TheirCare account through this server until you disconnect it.
 
 Docker on a home server with [Tailscale Funnel](https://tailscale.com/kb/1223/funnel):
 
     git clone https://github.com/acousland/theircare-mcp.git && cd theircare-mcp
-    cp .env.example .env            # public URL, Google client ID/secret, owner email
+    cp .env.example .env            # public URL and your TheirCare email
     mkdir -p data
     docker compose up -d --build
     sudo tailscale funnel --bg --https=443 http://127.0.0.1:43817
 
 The container publishes only on `127.0.0.1`. Funnel must be allowed for the device in your tailnet policy. Serve TheirCare at the **root of its own Funnel port**: OAuth discovery uses `/.well-known/...` paths, so it cannot share a port behind a path prefix. Funnel opens a whole port to the internet, so never turn it on for a port that also serves tailnet-only apps.
 
-Use port 443: Claude.ai's connector service did not reach Funnel on port 8443. Then add `https://<your-device>.<tailnet>.ts.net/mcp` as a custom connector in your AI app. Approve it after signing in with Google. Open the same origin in a browser to sign in to TheirCare and confirm reviews.
+Use port 443: ChatGPT's and Claude.ai's connector services did not reach Funnel on port 8443. Then add `https://<your-device>.<tailnet>.ts.net/mcp` as a custom connector in your AI app, choosing OAuth, and sign in to TheirCare on the page it opens.
 
 Without Docker: `npm run remote` with the same environment variables (`THEIRCARE_HOST`, `THEIRCARE_PORT` and `THEIRCARE_DATA_DIR` are optional).
 

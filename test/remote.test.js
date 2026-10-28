@@ -9,86 +9,75 @@ import { TheirCare } from '../src/portal.js';
 import { demoFetch } from '../src/demo.js';
 import { createRemote } from '../src/remote.js';
 
-const OWNER='owner@example.com', REDIRECT='https://client.example/callback';
-const google={clientId:'test-client.apps.googleusercontent.com',clientSecret:'test-secret',ownerEmail:OWNER};
-// Fake Google token endpoint: returns an ID token carrying whatever claims the test queued.
-let nextClaims=null, tokenRequests=[];
-const fakeGoogle=async(url,opts)=>{
-  tokenRequests.push({url,body:new URLSearchParams(opts.body)});
-  if(!nextClaims) return Response.json({error:'invalid_grant'},{status:400});
-  const part=o=>Buffer.from(JSON.stringify(o)).toString('base64url');
-  return Response.json({id_token:part({alg:'RS256'})+'.'+part(nextClaims)+'.sig'});
-};
-async function start(dataDir,{allowAiSave=false,portalFetch=demoFetch()}={}) {
-  const srv=http.createServer();await new Promise(r=>srv.listen(0,'127.0.0.1',r));
+const OWNER='owner@example.com', PASSWORD='correct horse', REDIRECT='https://client.example/callback';
+// Fake TheirCare with real sign-in and one session per account: end() is a sign-in elsewhere or an idle timeout.
+function fakeTheirCare() {
+  const demo=demoFetch({allowSave:true}), t={password:PASSWORD,live:false,logins:0,attempts:0,commits:0};
+  const redirect=location=>new Response(null,{status:302,headers:{location}});
+  t.fetch=async(url,o={})=>{
+    const u=new URL(url), body=new URLSearchParams(o.body);
+    if(u.pathname==='/family/login') return new Response('<form id="signInFrm" action="/family/j_spring_security_check"><input name="_csrf" value="c"></form>');
+    if(u.pathname==='/family/j_spring_security_check') {
+      t.attempts++;
+      if(body.get('j_username')!==OWNER||body.get('j_password')!==t.password) return redirect('/family/login?error');
+      t.live=true;t.logins++;return redirect('/family/dashboard');
+    }
+    if(!t.live) return redirect('/family/login');
+    if(body.get('action')==='submitConfirm') t.commits++;
+    return demo(url,o);
+  };
+  t.end=()=>{t.live=false;};
+  return t;
+}
+async function start(dataDir,{tc=fakeTheirCare(),port=0}={}) {
+  const srv=http.createServer();await new Promise(r=>srv.listen(port,'127.0.0.1',r));
   const base='http://localhost:'+srv.address().port;
-  const portal=new TheirCare({fetchImpl:portalFetch});portal.authenticated=true;
-  const remote=await createRemote({publicUrl:base,google,dataDir,portal,fetchImpl:fakeGoogle,allowAiSave});
+  const remote=await createRemote({publicUrl:base,ownerEmail:OWNER,dataDir,portal:new TheirCare({fetchImpl:tc.fetch})});
   srv.on('request',remote.app);
-  return {base,remote,close:()=>new Promise(r=>srv.close(r))};
+  return {base,remote,tc,close:async()=>{await remote.oauth.flush();await new Promise(r=>srv.close(r));}};
 }
 const get=(url,opts={})=>fetch(url,{redirect:'manual',...opts});
 const postForm=(url,body,cookie)=>get(url,{method:'POST',body:new URLSearchParams(body),headers:{'Content-Type':'application/x-www-form-urlencoded',...(cookie&&{Cookie:cookie})}});
 const cookieOf=res=>res.headers.getSetCookie().map(c=>c.split(';')[0]).join('; ');
-// Runs the Google sign-in round trip; claims(nonce) builds the ID token Google would return.
-async function googleSignIn(base,next='/',claims=nonce=>({iss:'https://accounts.google.com',aud:google.clientId,exp:Date.now()/1000+300,nonce,email:OWNER,email_verified:true})) {
-  const begin=await get(base+'/login?next='+encodeURIComponent(next));
-  const auth=new URL(begin.headers.get('location'));
-  assert.equal(auth.origin,'https://accounts.google.com');
-  assert.equal(auth.searchParams.get('redirect_uri'),base+'/login/google/callback');
-  nextClaims=claims(auth.searchParams.get('nonce'));
-  const res=await get(base+'/login/google/callback?'+new URLSearchParams({code:'google-code',state:auth.searchParams.get('state')}),{headers:{Cookie:cookieOf(begin)}});
-  nextClaims=null;
-  return {res,cookie:res.headers.getSetCookie().filter(c=>c.startsWith('tc_owner=')).map(c=>c.split(';')[0]).join('; ')};
-}
-async function signIn(base) {return (await googleSignIn(base)).cookie;}
-async function authorize(base,cookie,decision='approve') {
+// Starts an authorization request and opens the consent page; submit() posts the TheirCare sign-in form.
+async function beginConnect(base) {
   const reg=await (await get(base+'/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_name:'Test client',redirect_uris:[REDIRECT],token_endpoint_auth_method:'none'})})).json();
   const verifier=randomBytes(32).toString('base64url'), challenge=createHash('sha256').update(verifier).digest('base64url');
   const q=new URLSearchParams({response_type:'code',client_id:reg.client_id,redirect_uri:REDIRECT,code_challenge:challenge,code_challenge_method:'S256',state:'xyz',resource:base+'/mcp'});
-  const start=await get(base+'/authorize?'+q);
-  assert.equal(start.status,303);
-  const consentUrl=new URL(start.headers.get('location'),base);
-  const page=await (await get(consentUrl,{headers:{Cookie:cookie}})).text();
-  const csrf=page.match(/name="csrf" value="([^"]+)"/)[1];
-  const done=await postForm(base+'/oauth/consent',{request:consentUrl.searchParams.get('request'),csrf,decision},cookie);
-  return {client:reg,verifier,redirect:new URL(done.headers.get('location')),consentUrl,csrf};
+  const begin=await get(base+'/authorize?'+q);
+  assert.equal(begin.status,303);
+  const consentUrl=new URL(begin.headers.get('location'),base), request=consentUrl.searchParams.get('request');
+  const consent=await get(consentUrl);
+  const cookie=cookieOf(consent);
+  const submit=(fields={},c=cookie)=>postForm(base+'/oauth/consent',{request,email:OWNER,password:PASSWORD,decision:'approve',...fields},c);
+  return {client:reg,verifier,consent,submit};
 }
 const token=(base,body)=>get(base+'/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(body)});
+async function connect(base) {
+  const c=await beginConnect(base);
+  const done=await c.submit();
+  assert.equal(done.status,303);
+  const redirect=new URL(done.headers.get('location'));
+  const tokens=await (await token(base,{grant_type:'authorization_code',client_id:c.client.client_id,code:redirect.searchParams.get('code'),code_verifier:c.verifier,redirect_uri:REDIRECT,resource:base+'/mcp'})).json();
+  return {...c,redirect,tokens};
+}
 const mcp=(base,access,body)=>get(base+'/mcp',{method:'POST',headers:{Authorization:'Bearer '+access,'Content-Type':'application/json',Accept:'application/json, text/event-stream'},body:JSON.stringify(body)});
-
-test('Google sign-in admits only the verified owner email with a matching nonce',async()=>{
+function tools(base,access) {
+  let id=1;
+  return async(name,args={})=>{
+    const res=await mcp(base,access,{jsonrpc:'2.0',id:id++,method:'tools/call',params:{name,arguments:args}});
+    if(res.status!==200) return {status:res.status};
+    const r=(await res.json()).result, text=r.content[0].text;
+    let data;try{data=JSON.parse(text);}catch{data=text;}
+    return {...r,data};
+  };
+}
+const withDir=fn=>async()=>{
   const dir=await mkdtemp(path.join(tmpdir(),'tc-remote-'));
-  const s=await start(dir);
-  try {
-    const base={iss:'https://accounts.google.com',aud:google.clientId,exp:Date.now()/1000+300,email:OWNER,email_verified:true};
-    tokenRequests=[];
-    const ok=await googleSignIn(s.base,'/oauth/consent?request=abc');
-    assert.equal(ok.res.status,303);assert.equal(ok.res.headers.get('location'),'/oauth/consent?request=abc');assert.ok(ok.cookie);
-    const sent=tokenRequests[0].body;
-    assert.equal(sent.get('client_secret'),'test-secret');assert.ok(sent.get('code_verifier'),'PKCE is used with Google');
-    for(const [why,claims] of [
-      ['other account',n=>({...base,nonce:n,email:'someone@example.com'})],
-      ['unverified email',n=>({...base,nonce:n,email_verified:false})],
-      ['wrong audience',n=>({...base,nonce:n,aud:'other-client'})],
-      ['wrong issuer',n=>({...base,nonce:n,iss:'https://evil.example'})],
-      ['expired',n=>({...base,nonce:n,exp:Date.now()/1000-10})],
-      ['replayed nonce',()=>({...base,nonce:'other'})]
-    ]) {
-      const bad=await googleSignIn(s.base,'/',claims);
-      assert.equal(bad.res.status,403,why);assert.equal(bad.cookie,'',why);
-    }
-    const begin=await get(s.base+'/login');
-    const state=new URL(begin.headers.get('location')).searchParams.get('state');
-    const noCookie=await get(s.base+'/login/google/callback?'+new URLSearchParams({code:'c',state}));
-    assert.equal(noCookie.status,403,'a sign-in started in another browser cannot be finished here');
-    const offsite=await googleSignIn(s.base,'//evil.example');
-    assert.equal(offsite.res.headers.get('location'),'/');
-  } finally {await s.remote.oauth.flush();await s.close();await rm(dir,{recursive:true,force:true});}
-});
+  try {await fn(dir);} finally {await rm(dir,{recursive:true,force:true});}
+};
 
-test('remote OAuth flow issues tokens that unlock MCP tools, and survive a restart',async()=>{
-  const dir=await mkdtemp(path.join(tmpdir(),'tc-remote-'));
+test('connecting signs in to TheirCare once and issues tokens that unlock every tool, across restarts',withDir(async dir=>{
   let s=await start(dir);
   try {
     const unauth=await mcp(s.base,'bad',{jsonrpc:'2.0',id:1,method:'tools/list'});
@@ -99,103 +88,102 @@ test('remote OAuth flow issues tokens that unlock MCP tools, and survive a resta
     const asm=await (await get(s.base+'/.well-known/oauth-authorization-server')).json();
     assert.ok(asm.registration_endpoint&&asm.code_challenge_methods_supported.includes('S256'));
 
-    const {client,verifier,redirect}=await authorize(s.base,await signIn(s.base));
-    assert.equal(redirect.origin+redirect.pathname,REDIRECT);
-    assert.equal(redirect.searchParams.get('state'),'xyz');
-    const code=redirect.searchParams.get('code');
-    const bad=await token(s.base,{grant_type:'authorization_code',client_id:client.client_id,code,code_verifier:'wrong'.repeat(10),redirect_uri:REDIRECT});
-    assert.equal(bad.status,400);
-    const issued=await (await token(s.base,{grant_type:'authorization_code',client_id:client.client_id,code,code_verifier:verifier,redirect_uri:REDIRECT,resource:s.base+'/mcp'})).json();
-    assert.ok(issued.access_token&&issued.refresh_token);
-    const replay=await token(s.base,{grant_type:'authorization_code',client_id:client.client_id,code,code_verifier:verifier,redirect_uri:REDIRECT});
-    assert.equal(replay.status,400,'codes are single use');
+    const c=await connect(s.base);
+    assert.equal(c.redirect.origin+c.redirect.pathname,REDIRECT);assert.equal(c.redirect.searchParams.get('state'),'xyz');
+    assert.match(await c.consent.text(),/book or cancel sessions/);
+    assert.equal(s.tc.logins,1,'the consent page signs in to check the password');
+    const {access_token,refresh_token}=c.tokens;
+    assert.ok(access_token&&refresh_token);
 
-    const list=await (await mcp(s.base,issued.access_token,{jsonrpc:'2.0',id:1,method:'tools/list'})).json();
-    assert.equal(list.result.tools.length,6);
-    assert.ok(!list.result.tools.some(t=>/confirm|save/.test(t.name)));
-    const status=await (await mcp(s.base,issued.access_token,{jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'theircare_status',arguments:{}}})).json();
-    assert.deepEqual(JSON.parse(status.result.content[0].text),{signed_in:true,demo:false,companion_url:s.base,ai_can_save:false,remote:true});
-    const preview=await (await mcp(s.base,issued.access_token,{jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'theircare_preview_changes',arguments:{child_id:'1',care_type_id:'10',year:2026,changes:[{date:'2026-10-28',action:'book'}]}}})).json();
-    assert.equal(JSON.parse(preview.result.content[0].text).review_url,s.base+'/#review');
+    const list=await (await mcp(s.base,access_token,{jsonrpc:'2.0',id:1,method:'tools/list'})).json();
+    assert.ok(list.result.tools.some(t=>t.name==='theircare_confirm_changes'));
+    const call=tools(s.base,access_token);
+    assert.deepEqual((await call('theircare_status')).data,{signed_in:true,demo:false,ai_can_save:true,remote:true});
+    const preview=await call('theircare_preview_changes',{child_id:'1',care_type_id:'10',year:2026,changes:[{date:'2026-10-28',action:'book'}]});
+    assert.equal(preview.data.review_url,undefined,'there is no review page remotely');
+    assert.match(preview.data.note,/explicitly agree/);
 
     const stored=await readFile(path.join(dir,'oauth.json'),'utf8');
-    assert.ok(!stored.includes(issued.access_token)&&!stored.includes(issued.refresh_token),'tokens are stored hashed');
-    const ownerCookie=await signIn(s.base);
-    const sessions=await readFile(path.join(dir,'sessions.json'),'utf8');
-    assert.ok(!sessions.includes(ownerCookie.split('=')[1]),'session ids are stored hashed');
-    await s.remote.oauth.flush();await s.remote.owner.flush();await s.close();
-    s=await start(dir);
-    const after=await get(s.base+'/api/status',{headers:{Cookie:ownerCookie,'X-TheirCare-UI':'1'}});
-    assert.equal(after.status,200,'owner sign-in survives a restart');
-    // A new port means a new origin, so only check that refresh survives via the stored client and token.
-    const refreshed=await token(s.base,{grant_type:'refresh_token',client_id:client.client_id,refresh_token:issued.refresh_token});
-    assert.equal(refreshed.status,200);
-    const again=await token(s.base,{grant_type:'refresh_token',client_id:client.client_id,refresh_token:issued.refresh_token});
-    assert.equal(again.status,400,'refresh tokens rotate');
-  } finally {await s.remote.oauth.flush();await s.close();await rm(dir,{recursive:true,force:true});}
-});
+    for(const secret of [access_token,refresh_token,access_token.split('.')[1],PASSWORD])
+      assert.ok(!stored.includes(secret),'tokens, vault keys and the password are never stored in the clear');
 
-test('remote companion pages and consent require the owner sign-in',async()=>{
-  const dir=await mkdtemp(path.join(tmpdir(),'tc-remote-'));
+    await s.close();
+    s=await start(dir,{port:Number(new URL(s.base).port)});
+    assert.equal(s.tc.logins,0);
+    const refreshed=await token(s.base,{grant_type:'refresh_token',client_id:c.client.client_id,refresh_token});
+    assert.equal(refreshed.status,200);
+    const again=await token(s.base,{grant_type:'refresh_token',client_id:c.client.client_id,refresh_token});
+    assert.equal(again.status,400,'refresh tokens rotate');
+    const fresh=await refreshed.json();
+    const bookings=await tools(s.base,fresh.access_token)('theircare_list_bookings',{start:'2026-10-20',end:'2026-11-20'});
+    assert.equal(bookings.isError,false,'after a restart the server signs in with the sealed credentials');
+    assert.equal(s.tc.logins,1);
+  } finally {await s.close();}
+}));
+
+test('a TheirCare session ended elsewhere is restored automatically, but saving is never retried',withDir(async dir=>{
   const s=await start(dir);
   try {
-    const home=await get(s.base+'/');
-    assert.equal(home.status,303);assert.equal(home.headers.get('location'),'/login');
-    const cookie=await signIn(s.base);
-    const ui=await get(s.base+'/');
-    const uiCookie=cookieOf(await get(s.base+'/',{headers:{Cookie:cookie}}));
-    assert.equal(ui.status,303);
-    const signedOut=await get(s.base+'/api/status',{headers:{Cookie:uiCookie,'X-TheirCare-UI':'1'}});
-    assert.equal(signedOut.status,401,'UI cookie alone is not enough');
-    const signedIn=await get(s.base+'/api/status',{headers:{Cookie:cookie,'X-TheirCare-UI':'1'}});
-    assert.equal(signedIn.status,200);
-    const noHeader=await get(s.base+'/api/status',{headers:{Cookie:cookie}});
-    assert.equal(noHeader.status,401,'the UI header is still required');
-    const {consentUrl}=await authorize(s.base,cookie,'deny').then(async r=>{
-      assert.equal(r.redirect.searchParams.get('error'),'access_denied');return r;});
-    const anon=await get(consentUrl);
-    assert.equal(anon.status,303);assert.match(anon.headers.get('location'),/^\/login\?next=/);
-    const {consentUrl:pending}=await (async()=>{
-      const reg=await (await get(s.base+'/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({redirect_uris:[REDIRECT],token_endpoint_auth_method:'none'})})).json();
-      const st=await get(s.base+'/authorize?'+new URLSearchParams({response_type:'code',client_id:reg.client_id,redirect_uri:REDIRECT,code_challenge:'x'.repeat(43),code_challenge_method:'S256'}));
-      return {consentUrl:new URL(st.headers.get('location'),s.base)};
-    })();
-    const forged=await postForm(s.base+'/oauth/consent',{request:pending.searchParams.get('request'),csrf:'forged',decision:'approve'},cookie);
-    assert.equal(forged.status,403);
+    const call=tools(s.base,(await connect(s.base)).tokens.access_token);
+    s.tc.end();
+    const bookings=await call('theircare_list_bookings',{start:'2026-10-20',end:'2026-11-20'});
+    assert.equal(bookings.isError,false);assert.equal(s.tc.logins,2);
+
+    const preview=await call('theircare_preview_changes',{child_id:'1',care_type_id:'10',year:2026,changes:[{date:'2026-10-28',action:'book'}]});
+    s.tc.end();
+    const lost=await call('theircare_confirm_changes',{preview_id:preview.data.id,accept_terms:true});
+    assert.equal(lost.isError,true);assert.equal(s.tc.commits,0);
+
+    const retry=await call('theircare_preview_changes',{child_id:'1',care_type_id:'10',year:2026,changes:[{date:'2026-10-28',action:'book'}]});
+    const notAccepted=await call('theircare_confirm_changes',{preview_id:retry.data.id,accept_terms:false});
+    assert.equal(notAccepted.isError,true,'accept_terms must be true');
+    const saved=await call('theircare_confirm_changes',{preview_id:retry.data.id,accept_terms:true});
+    assert.deepEqual(saved.data,{saved:true,verified:true,changes:[{date:'2026-10-28',action:'book',verified:true}]});
+    const replay=await call('theircare_confirm_changes',{preview_id:retry.data.id,accept_terms:true});
+    assert.equal(replay.data.code,'PREVIEW_EXPIRED');assert.equal(s.tc.commits,1);
+  } finally {await s.close();}
+}));
+
+test('a changed TheirCare password drops the connection after one attempt',withDir(async dir=>{
+  const s=await start(dir);
+  try {
+    const call=tools(s.base,(await connect(s.base)).tokens.access_token);
+    s.tc.password='changed';s.tc.end();
+    const attempts=s.tc.attempts;
+    const failed=await call('theircare_list_bookings',{start:'2026-10-20',end:'2026-11-20'});
+    assert.equal(failed.data.code,'RECONNECT_REQUIRED');
+    assert.equal(s.tc.attempts,attempts+1,'one sign-in attempt, so the account is not locked');
+    assert.equal((await call('theircare_status')).status,401,'the AI app is asked to reconnect');
+    await s.remote.oauth.flush();
+    const stored=JSON.parse(await readFile(path.join(dir,'oauth.json'),'utf8'));
+    assert.deepEqual(stored.vaults,{});assert.deepEqual(stored.tokens,{});
+  } finally {await s.close();}
+}));
+
+test('the consent page admits only the owner, binds to the browser and limits failed attempts',withDir(async dir=>{
+  const s=await start(dir);
+  try {
+    assert.match(await (await get(s.base+'/')).text(),/\/mcp/);
+    const c=await beginConnect(s.base);
+    assert.equal((await c.submit({},'')).status,403,'a POST without the consent cookie is refused');
+    const other=await c.submit({email:'someone@example.com'});
+    assert.equal(other.status,400);assert.match(await other.text(),/not allowed/);
+    assert.equal(s.tc.attempts,0,'other accounts are refused before contacting TheirCare');
+    const wrong=await c.submit({password:'wrong'});
+    assert.equal(wrong.status,400);assert.equal(s.tc.attempts,1);
+    for(let i=0;i<3;i++) await c.submit({password:'wrong'});
+    const limited=await c.submit();
+    assert.match(await limited.text(),/Too many failed attempts/);assert.equal(s.tc.attempts,4);
+    const deny=await (await beginConnect(s.base)).submit({decision:'deny',password:''});
+    assert.equal(new URL(deny.headers.get('location')).searchParams.get('error'),'access_denied');
     // fetch cannot override Host, so use node:http for DNS-rebinding checks.
     const withHost=(p,host)=>new Promise((resolve,reject)=>http.get(s.base+p,{headers:{Host:host}},res=>{res.resume();resolve(res.statusCode);}).on('error',reject));
-    assert.equal(await withHost('/login','evil.example'),403);
+    assert.equal(await withHost('/','evil.example'),403);
     assert.equal(await withHost('/healthz','127.0.0.1:43817'),200);
-    const bearerOnly=await get(s.base+'/api/status',{headers:{Authorization:'Bearer '+s.remote.token}});
-    assert.equal(bearerOnly.status,401,'the local bridge token is disabled remotely');
-  } finally {await s.remote.oauth.flush();await s.close();await rm(dir,{recursive:true,force:true});}
-});
+  } finally {await s.close();}
+}));
 
-test('with AI saving enabled, MCP clients can confirm a preview once and only with accepted terms',async()=>{
-  const dir=await mkdtemp(path.join(tmpdir(),'tc-remote-'));
-  let commits=0;const fake=demoFetch({allowSave:true});
-  const s=await start(dir,{allowAiSave:true,portalFetch:async(url,o)=>{if(new URLSearchParams(o?.body).get('action')==='submitConfirm')commits++;return fake(url,o);}});
-  try {
-    const {client,verifier,redirect}=await authorize(s.base,await signIn(s.base));
-    const {access_token}=await (await token(s.base,{grant_type:'authorization_code',client_id:client.client_id,code:redirect.searchParams.get('code'),code_verifier:verifier,redirect_uri:REDIRECT})).json();
-    let id=10;
-    const call=async(name,args)=>{const r=await (await mcp(s.base,access_token,{jsonrpc:'2.0',id:id++,method:'tools/call',params:{name,arguments:args}})).json();const text=r.result.content[0].text;let data;try{data=JSON.parse(text);}catch{data=text;}return {...r.result,data};};
-    const tools=(await (await mcp(s.base,access_token,{jsonrpc:'2.0',id:1,method:'tools/list'})).json()).result.tools;
-    const confirmTool=tools.find(t=>t.name==='theircare_confirm_changes');
-    assert.ok(confirmTool);assert.equal(confirmTool.annotations.destructiveHint,true);
-    const preview=await call('theircare_preview_changes',{child_id:'1',care_type_id:'10',year:2026,changes:[{date:'2026-10-28',action:'book'}]});
-    assert.match(preview.data.note,/explicitly agree/);
-    const notAccepted=await call('theircare_confirm_changes',{preview_id:preview.data.id,accept_terms:false});
-    assert.equal(notAccepted.isError,true,'accept_terms must be true');
-    assert.equal(commits,0);
-    const saved=await call('theircare_confirm_changes',{preview_id:preview.data.id,accept_terms:true});
-    assert.equal(saved.isError,false);assert.deepEqual(saved.data,{saved:true,verified:true,changes:[{date:'2026-10-28',action:'book',verified:true}]});
-    assert.equal(commits,1);
-    const replay=await call('theircare_confirm_changes',{preview_id:preview.data.id,accept_terms:true});
-    assert.equal(replay.isError,true);assert.equal(replay.data.code,'PREVIEW_EXPIRED');assert.equal(commits,1);
-  } finally {await s.remote.oauth.flush();await s.remote.owner.flush();await s.close();await rm(dir,{recursive:true,force:true});}
-});
-
-test('remote URL must be a bare origin',async()=>{
-  await assert.rejects(createRemote({publicUrl:'https://example.ts.net:8443/theircare',google,dataDir:tmpdir()}),/no path/);
+test('remote mode needs a bare origin and an owner email',async()=>{
+  await assert.rejects(createRemote({publicUrl:'https://example.ts.net:8443/theircare',ownerEmail:OWNER,dataDir:tmpdir()}),/no path/);
+  await assert.rejects(createRemote({publicUrl:'https://example.ts.net',dataDir:tmpdir()}),/OWNER_EMAIL/);
 });
