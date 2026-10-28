@@ -122,7 +122,7 @@ export async function createRemote({publicUrl,ownerEmail,dataDir,portal=new Thei
     const creds=oauth.credentials(req.auth.token);
     if(!creds) return res.status(401).set('WWW-Authenticate','Bearer error="invalid_token", resource_metadata="'+metadataUrl+'"').json({error:'invalid_token'});
     // Stateless: one server and transport per request.
-    const server=new McpServer({name:'theircare',version:'0.1.0'});
+    const server=new McpServer({name:'theircare',version:'1.0.0'});
     registerTools(server,async(op,args)=>{
       try {const data=await run(creds,op,args);console.error('tool '+op+' ok');return {data,ok:true};}
       catch(e) {const data=errorBody(e);console.error('tool '+op+' failed: '+data.code);return {data,ok:false};}

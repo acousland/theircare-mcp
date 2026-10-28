@@ -4,7 +4,7 @@ import { ensureServer, readConnection } from './runtime.js';
 import { registerTools } from './tools.js';
 import { aiSaveEnabled } from './companion.js';
 await ensureServer();
-const server=new McpServer({name:'theircare-local',version:'0.1.0'});
+const server=new McpServer({name:'theircare-local',version:'1.0.0'});
 registerTools(server,async(op,body)=>{
   const info=await readConnection();
   const response=await fetch(info.origin+'/api/'+op,{method:body?'POST':'GET',
