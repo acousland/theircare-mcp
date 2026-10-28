@@ -22,7 +22,7 @@ export async function createRemote({publicUrl,google,dataDir,portal=new TheirCar
   const origin=new URL(publicUrl);
   if(origin.origin!==publicUrl.replace(/\/$/,'')) throw Error('THEIRCARE_PUBLIC_URL must be an origin with no path, e.g. https://homeserver.example.ts.net');
   const resource=new URL('/mcp',origin);
-  const owner=createOwner({...google,redirectUri:new URL('/login/google/callback',origin).href,secure:origin.protocol==='https:',fetchImpl});
+  const owner=createOwner({...google,redirectUri:new URL('/login/google/callback',origin).href,file:path.join(dataDir,'sessions.json'),secure:origin.protocol==='https:',fetchImpl});
   const oauth=await createOAuthProvider({dataDir,resource});
   const form=express.urlencoded({extended:false,limit:'8kb'});
   function routes(app,{run}) {
@@ -32,6 +32,7 @@ export async function createRemote({publicUrl,google,dataDir,portal=new TheirCar
       try {
         const result=await owner.finish(req,res);
         if(result.ok) return res.redirect(303,safeNext(result.next));
+        console.error('Google sign-in refused: '+result.reason);
         res.status(403).type('html').send(page('Not signed in','<p class="error">'+esc(result.error)+'</p><p><a class="primary" href="/login">Try again</a></p>'));
       } catch(e) {next(e);}
     });
@@ -63,7 +64,8 @@ export async function createRemote({publicUrl,google,dataDir,portal=new TheirCar
       // Stateless: one server and transport per request.
       const server=new McpServer({name:'theircare',version:'0.1.0'});
       registerTools(server,async(op,args)=>{
-        try {return {data:await run(op,args),ok:true};} catch(e) {return {data:errorBody(e),ok:false};}
+        try {return {data:await run(op,args),ok:true};}
+        catch(e) {const data=errorBody(e);console.error('tool '+op+' failed: '+data.code);return {data,ok:false};}
       });
       const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
       res.on('close',()=>{transport.close();server.close();});

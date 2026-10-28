@@ -120,8 +120,13 @@ test('remote OAuth flow issues tokens that unlock MCP tools, and survive a resta
 
     const stored=await readFile(path.join(dir,'oauth.json'),'utf8');
     assert.ok(!stored.includes(issued.access_token)&&!stored.includes(issued.refresh_token),'tokens are stored hashed');
-    await s.remote.oauth.flush();await s.close();
+    const ownerCookie=await signIn(s.base);
+    const sessions=await readFile(path.join(dir,'sessions.json'),'utf8');
+    assert.ok(!sessions.includes(ownerCookie.split('=')[1]),'session ids are stored hashed');
+    await s.remote.oauth.flush();await s.remote.owner.flush();await s.close();
     s=await start(dir);
+    const after=await get(s.base+'/api/status',{headers:{Cookie:ownerCookie,'X-TheirCare-UI':'1'}});
+    assert.equal(after.status,200,'owner sign-in survives a restart');
     // A new port means a new origin, so only check that refresh survives via the stored client and token.
     const refreshed=await token(s.base,{grant_type:'refresh_token',client_id:client.client_id,refresh_token:issued.refresh_token});
     assert.equal(refreshed.status,200);
@@ -142,8 +147,10 @@ test('remote companion pages and consent require the owner sign-in',async()=>{
     assert.equal(ui.status,303);
     const signedOut=await get(s.base+'/api/status',{headers:{Cookie:uiCookie,'X-TheirCare-UI':'1'}});
     assert.equal(signedOut.status,401,'UI cookie alone is not enough');
-    const signedIn=await get(s.base+'/api/status',{headers:{Cookie:uiCookie+'; '+cookie,'X-TheirCare-UI':'1'}});
+    const signedIn=await get(s.base+'/api/status',{headers:{Cookie:cookie,'X-TheirCare-UI':'1'}});
     assert.equal(signedIn.status,200);
+    const noHeader=await get(s.base+'/api/status',{headers:{Cookie:cookie}});
+    assert.equal(noHeader.status,401,'the UI header is still required');
     const {consentUrl}=await authorize(s.base,cookie,'deny').then(async r=>{
       assert.equal(r.redirect.searchParams.get('error'),'access_denied');return r;});
     const anon=await get(consentUrl);

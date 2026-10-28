@@ -11,7 +11,7 @@ export const errorBody=err=>err instanceof PortalError?{error:err.message,code:e
 // remote: {owner, routes(app)} when served behind an HTTPS proxy. owner gates every human page and UI call.
 export function createCompanion({portal=new TheirCare(),token=randomBytes(32).toString('hex'),origin='http://127.0.0.1:43817',remote=null}={}) {
   const app=express(), uiToken=randomBytes(32).toString('hex'), host=new URL(origin).host;
-  let demo=false;
+  let demo=false, keepAliveUntil=0;
   const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
   app.disable('x-powered-by');
   if(remote) {
@@ -42,9 +42,18 @@ export function createCompanion({portal=new TheirCare(),token=randomBytes(32).to
   };
   const run=(op,args)=>portal.serial(()=>ops[op](args));
   remote?.routes(app,{run});
+  if(remote) {
+    // TheirCare signs idle sessions out quickly. Remotely, refresh it for up to 12 hours after each sign-in.
+    setInterval(()=>{
+      if(!portal.authenticated||demo||Date.now()>keepAliveUntil) return;
+      portal.serial(()=>portal.request('/family/dashboard')).catch(e=>console.error('TheirCare keep-alive: '+(e.code||'error')));
+    },5*60000).unref();
+  }
   app.use('/api',(req,res,next)=>{
     const bearer=!remote&&equal(req.headers.authorization,'Bearer '+token);
-    const ui=equal(readCookie(req,'tc_ui'),uiToken)&&req.headers['x-theircare-ui']==='1'&&(!remote||!!remote.owner.check(req));
+    // Remotely the persisted owner session replaces the per-process UI cookie, so restarts do not break open pages.
+    // The custom header still forces a CORS preflight, and the SameSite=Lax session is not sent on cross-site POSTs.
+    const ui=req.headers['x-theircare-ui']==='1'&&(remote?!!remote.owner.check(req):equal(readCookie(req,'tc_ui'),uiToken));
     if(req.headers.origin && req.headers.origin!==origin) return res.status(403).json({error:'Cross-site request blocked.'});
     if(!bearer&&!ui) return res.status(401).json({error:remote?'Sign in to the companion again.':'Local authorization required.'});
     req.isHumanUI=ui;
@@ -57,7 +66,7 @@ export function createCompanion({portal=new TheirCare(),token=randomBytes(32).to
   app.post('/api/login',route(async req=>{
     if(!req.isHumanUI) throw new PortalError('Sign in personally in the companion.','UI_REQUIRED');
     portal.fetchImpl=fetch; demo=false;
-    try {return await portal.login(String(req.body.email||''),String(req.body.password||''));}
+    try {const result=await portal.login(String(req.body.email||''),String(req.body.password||''));keepAliveUntil=Date.now()+12*3600000;return result;}
     finally {if(req.body) {req.body.password='';req.body.email='';}}
   }));
   app.post('/api/demo',route(req=>{

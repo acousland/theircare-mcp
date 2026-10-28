@@ -103,7 +103,8 @@ What changes in remote mode:
 - **Sign in with Google** protects the companion and every OAuth approval. Only the one verified address in `THEIRCARE_OWNER_EMAIL` is let in.
 - AI apps register themselves, then you approve each one in the companion. Access tokens last 1 hour, and refresh tokens last 30 days and rotate on each use. Tokens are stored hashed in `data/oauth.json`. Delete that file to revoke every connection.
 - The local bridge token is disabled. There is still no MCP tool for final saving; you confirm in the companion.
-- Your TheirCare session stays in memory, so after a restart you sign in to TheirCare again.
+- Google sign-ins last 30 days and are stored hashed in `data/sessions.json`, so restarts keep you signed in.
+- Your TheirCare session stays in memory, so after a restart you sign in to TheirCare again. The server keeps it from idling out for up to 12 hours after each TheirCare sign-in.
 
 Create a Google OAuth client first. In [Google Cloud Console](https://console.cloud.google.com/apis/credentials), set up the OAuth consent screen (External, Testing, with your address as a test user). Then create an **OAuth client ID** of type **Web application**, with the authorized redirect URI `<THEIRCARE_PUBLIC_URL>/login/google/callback`. Only the `openid` and `email` scopes are requested.
 
