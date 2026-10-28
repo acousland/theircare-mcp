@@ -1,0 +1,15 @@
+# Remote mode for a home server. Publish with Tailscale Funnel; see "Remote hosting" in the README.
+services:
+  theircare:
+    build: .
+    container_name: theircare-mcp
+    restart: unless-stopped
+    env_file: .env
+    # Loopback only: the HTTPS proxy on this host is the sole way in.
+    ports: ["127.0.0.1:43817:43817"]
+    volumes: ["./data:/data"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true

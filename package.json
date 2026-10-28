@@ -13,10 +13,12 @@
     "stop": "node src/stop.js",
     "config": "node src/config.js",
     "check": "node scripts/check.js",
-    "test:mcp": "node test/mcp-smoke.js"
+    "test:mcp": "node test/mcp-smoke.js",
+    "remote": "node src/remote.js",
+    "owner-password": "node src/owner-password.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "cheerio": "^1.1.2",
     "express": "^5.1.0",
     "tough-cookie": "^6.0.0",

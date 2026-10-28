@@ -4,32 +4,51 @@ import path from 'node:path';
 import { TheirCare, PortalError } from './portal.js';
 import { ROOT, writeConnection, readConnection } from './runtime.js';
 import { demoFetch } from './demo.js';
+import { readCookie } from './owner.js';
 
-export function createCompanion({portal=new TheirCare(),token=randomBytes(32).toString('hex'),origin='http://127.0.0.1:43817'}={}) {
-  const app=express(), uiToken=randomBytes(32).toString('hex');
+export const errorBody=err=>err instanceof PortalError?{error:err.message,code:err.code}:{error:'The companion encountered an error.',code:'INTERNAL_ERROR'};
+
+// remote: {owner, routes(app)} when served behind an HTTPS proxy. owner gates every human page and UI call.
+export function createCompanion({portal=new TheirCare(),token=randomBytes(32).toString('hex'),origin='http://127.0.0.1:43817',remote=null}={}) {
+  const app=express(), uiToken=randomBytes(32).toString('hex'), host=new URL(origin).host;
   let demo=false;
   const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
   app.disable('x-powered-by');
+  if(remote) {
+    app.set('trust proxy',1);
+    app.get('/healthz',(req,res)=>res.json({ok:true}));
+  }
   app.use((req,res,next)=>{
-    if(req.headers.host!==new URL(origin).host) return res.status(403).json({error:'Invalid host.'});
+    // Proxies may forward the public name in X-Forwarded-Host. This is DNS-rebinding defence, not authentication.
+    if(req.headers.host!==host && !(remote && req.headers['x-forwarded-host']===host)) return res.status(403).json({error:'Invalid host.'});
     res.set({'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer',
       'Content-Security-Policy':"default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});
+    if(remote) res.set('Strict-Transport-Security','max-age=31536000');
     next();
   });
   app.use(express.json({limit:'32kb'}));
+  const ops={
+    status:()=>({signed_in:portal.authenticated,demo,companion_url:origin,...(remote&&{remote:true})}),
+    context:()=>portal.context(),
+    bookings:args=>portal.bookings(args),
+    availability:args=>portal.availability(args),
+    preview:async args=>({...await portal.previewChanges(args),review_url:origin+'/#review'}),
+    discard:()=>{portal.preview=null;return {discarded:true};}
+  };
+  const run=(op,args)=>portal.serial(()=>ops[op](args));
+  remote?.routes(app,{run});
   app.use('/api',(req,res,next)=>{
-    const bearer=equal(req.headers.authorization,'Bearer '+token);
-    const cookie=(req.headers.cookie||'').split(';').map(s=>s.trim()).find(s=>s.startsWith('tc_ui='))?.slice(6);
-    const ui=equal(cookie,uiToken)&&req.headers['x-theircare-ui']==='1';
+    const bearer=!remote&&equal(req.headers.authorization,'Bearer '+token);
+    const ui=equal(readCookie(req,'tc_ui'),uiToken)&&req.headers['x-theircare-ui']==='1'&&(!remote||!!remote.owner.check(req));
     if(req.headers.origin && req.headers.origin!==origin) return res.status(403).json({error:'Cross-site request blocked.'});
-    if(!bearer&&!ui) return res.status(401).json({error:'Local authorization required.'});
+    if(!bearer&&!ui) return res.status(401).json({error:remote?'Sign in to the companion again.':'Local authorization required.'});
     req.isHumanUI=ui;
     next();
   });
   const route=(fn)=>async(req,res,next)=>{
     try {res.json(await portal.serial(()=>fn(req)));} catch(e){next(e);}
   };
-  app.get('/api/status',route(()=>({signed_in:portal.authenticated,demo,companion_url:origin})));
+  app.get('/api/status',route(()=>ops.status()));
   app.post('/api/login',route(async req=>{
     if(!req.isHumanUI) throw new PortalError('Sign in personally in the companion.','UI_REQUIRED');
     portal.fetchImpl=fetch; demo=false;
@@ -47,27 +66,27 @@ export function createCompanion({portal=new TheirCare(),token=randomBytes(32).to
     portal.reset();portal.fetchImpl=fetch;demo=false;
     return {signed_in:false};
   }));
-  app.get('/api/context',route(()=>portal.context()));
-  app.post('/api/bookings',route(req=>portal.bookings(req.body)));
-  app.post('/api/availability',route(req=>portal.availability(req.body)));
-  app.post('/api/preview',route(async req=>({...await portal.previewChanges(req.body),review_url:origin+'/#review'})));
+  app.get('/api/context',route(()=>ops.context()));
+  app.post('/api/bookings',route(req=>ops.bookings(req.body)));
+  app.post('/api/availability',route(req=>ops.availability(req.body)));
+  app.post('/api/preview',route(req=>ops.preview(req.body)));
   app.get('/api/preview',route(()=>portal.preview?portal.getPreview(portal.preview.publicPart.id).publicPart:null));
-  app.post('/api/discard',route(()=>{portal.preview=null;return {discarded:true};}));
+  app.post('/api/discard',route(()=>ops.discard()));
   app.post('/api/confirm',route(async req=>{
     if(!req.isHumanUI || req.body.accept_terms!==true) throw new PortalError('Review and accept the terms yourself in the companion.','HUMAN_CONFIRMATION_REQUIRED');
     if(demo) throw new PortalError('Sample mode cannot save real bookings.','DEMO_ONLY');
     return portal.confirm(req.body.id);
   }));
   app.get('/',(req,res)=>{
-    res.cookie('tc_ui',uiToken,{httpOnly:true,sameSite:'strict',path:'/'});
+    if(remote && !remote.owner.check(req)) return res.redirect(303,'/login');
+    res.cookie('tc_ui',uiToken,{httpOnly:true,sameSite:'strict',path:'/',secure:!!remote});
     res.sendFile(path.join(ROOT,'public/index.html'));
   });
   app.use(express.static(path.join(ROOT,'public'),{index:false}));
   app.use((err,req,res,next)=>{
-    const known=err instanceof PortalError;
-    res.status(known?400:500).json({error:known?err.message:'The local companion encountered an error.',code:known?err.code:'INTERNAL_ERROR'});
+    res.status(err instanceof PortalError?400:500).json(errorBody(err));
   });
-  return {app,portal,token};
+  return {app,portal,token,run};
 }
 if(process.argv[1]===path.join(ROOT,'src/companion.js')) {
   let previousToken;

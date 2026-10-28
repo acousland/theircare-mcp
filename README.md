@@ -86,13 +86,39 @@ There is **no MCP tool for final saving or accepting terms**. You confirm person
 - The companion listens only on **127.0.0.1:43817**, with Host/Origin checks and separate browser/MCP access.
 - **.runtime/connection.json** holds a bridge credential. Git ignores it and packages exclude it. Never share .runtime.
 - The browser confirmation boundary prevents saving through the provided MCP tools; it is not isolation from malicious software running as your OS user.
-- Run on a trusted local computer. Do not expose through a proxy or public tunnel.
+- Run on a trusted local computer. Do not expose local mode through a proxy or public tunnel; use [remote hosting](#remote-hosting-optional) instead.
 
 To stop and clear the session:
 
     npm run stop
 
 An enabled MCP client can restart the companion; remove/disable its registration to keep it stopped.
+
+## Remote hosting (optional)
+
+Remote mode runs the companion, an OAuth 2.1 authorization server and a **Streamable HTTP** MCP endpoint (`/mcp`) on one HTTPS origin. Use it to connect web or mobile assistants (such as Claude.ai custom connectors) from anywhere. It is opt-in; the local stdio setup above is unchanged.
+
+What changes in remote mode:
+
+- An **owner password** (not your TheirCare password) protects the companion and every OAuth approval. Only its scrypt hash is configured. After 10 failed attempts in 15 minutes, sign-in is paused for everyone.
+- AI apps register themselves, then you approve each one in the companion. Access tokens last 1 hour, and refresh tokens last 30 days and rotate on each use. Tokens are stored hashed in `data/oauth.json`. Delete that file to revoke every connection.
+- The local bridge token is disabled. There is still no MCP tool for final saving; you confirm in the companion.
+- Your TheirCare session stays in memory, so after a restart you sign in to TheirCare again.
+
+Docker on a home server with [Tailscale Funnel](https://tailscale.com/kb/1223/funnel):
+
+    git clone https://github.com/acousland/theircare-mcp.git && cd theircare-mcp
+    npm run owner-password          # prints THEIRCARE_OWNER_PASSWORD_HASH=...
+    cp .env.example .env            # set THEIRCARE_PUBLIC_URL and paste the hash
+    mkdir -p data
+    docker compose up -d --build
+    sudo tailscale funnel --bg --https=8443 http://127.0.0.1:43817
+
+The container publishes only on `127.0.0.1`. Funnel must be allowed for the device in your tailnet policy. Serve TheirCare at the **root of its own Funnel port**: OAuth discovery uses `/.well-known/...` paths, so it cannot share a port behind a path prefix. Funnel opens a whole port to the internet, so never turn it on for a port that also serves tailnet-only apps.
+
+Then add `https://<your-device>.<tailnet>.ts.net:8443/mcp` as a custom connector in your AI app. Approve it after signing in with the owner password. Open the same origin in a browser to sign in to TheirCare and confirm reviews.
+
+Without Docker: `npm run remote` with the same environment variables (`THEIRCARE_HOST`, `THEIRCARE_PORT` and `THEIRCARE_DATA_DIR` are optional).
 
 ## Updating
 
