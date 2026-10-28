@@ -17,6 +17,11 @@ export function createCompanion({portal=new TheirCare(),token=randomBytes(32).to
   if(remote) {
     app.set('trust proxy',1);
     app.get('/healthz',(req,res)=>res.json({ok:true}));
+    // Access log without query strings, which can carry OAuth codes.
+    app.use((req,res,next)=>{
+      res.on('finish',()=>console.error([new Date().toISOString(),req.method,req.path,res.statusCode,req.headers.host,JSON.stringify(req.headers['user-agent']||'')].join(' ')));
+      next();
+    });
   }
   app.use((req,res,next)=>{
     // Proxies may forward the public name in X-Forwarded-Host. This is DNS-rebinding defence, not authentication.
