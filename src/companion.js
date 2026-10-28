@@ -9,7 +9,9 @@ import { readCookie } from './owner.js';
 export const errorBody=err=>err instanceof PortalError?{error:err.message,code:err.code}:{error:'The companion encountered an error.',code:'INTERNAL_ERROR'};
 
 // remote: {owner, routes(app)} when served behind an HTTPS proxy. owner gates every human page and UI call.
-export function createCompanion({portal=new TheirCare(),token=randomBytes(32).toString('hex'),origin='http://127.0.0.1:43817',remote=null}={}) {
+// allowAiSave lets MCP clients confirm previews (THEIRCARE_ALLOW_AI_SAVE=true); otherwise only the human UI can save.
+export const aiSaveEnabled=()=>process.env.THEIRCARE_ALLOW_AI_SAVE==='true';
+export function createCompanion({portal=new TheirCare(),token=randomBytes(32).toString('hex'),origin='http://127.0.0.1:43817',remote=null,allowAiSave=aiSaveEnabled()}={}) {
   const app=express(), uiToken=randomBytes(32).toString('hex'), host=new URL(origin).host;
   let demo=false, keepAliveUntil=0;
   const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
@@ -32,13 +34,23 @@ export function createCompanion({portal=new TheirCare(),token=randomBytes(32).to
     next();
   });
   app.use(express.json({limit:'32kb'}));
+  // Same checks for the human UI and, when enabled, MCP clients: explicit terms acceptance, never in sample mode.
+  // portal.confirm re-runs the review, refuses changed fees/terms, submits once and verifies the saved calendar.
+  function confirm(body,human) {
+    if(!human&&!allowAiSave) throw new PortalError('Review and accept the terms yourself in the companion.','HUMAN_CONFIRMATION_REQUIRED');
+    if(body?.accept_terms!==true) throw new PortalError(human?'Review and accept the terms yourself in the companion.':'Confirm only after the user accepts the terms; pass accept_terms: true.','HUMAN_CONFIRMATION_REQUIRED');
+    if(demo) throw new PortalError('Sample mode cannot save real bookings.','DEMO_ONLY');
+    return portal.confirm(String(body.id||''));
+  }
   const ops={
-    status:()=>({signed_in:portal.authenticated,demo,companion_url:origin,...(remote&&{remote:true})}),
+    status:()=>({signed_in:portal.authenticated,demo,companion_url:origin,ai_can_save:allowAiSave,...(remote&&{remote:true})}),
     context:()=>portal.context(),
     bookings:args=>portal.bookings(args),
     availability:args=>portal.availability(args),
-    preview:async args=>({...await portal.previewChanges(args),review_url:origin+'/#review'}),
-    discard:()=>{portal.preview=null;return {discarded:true};}
+    preview:async args=>({...await portal.previewChanges(args),review_url:origin+'/#review',
+      ...(allowAiSave&&{note:'Not saved. Show the user these exact changes, fees, cancellation policy and terms. Only after they explicitly agree, call theircare_confirm_changes with this id, or they can confirm at review_url.'})}),
+    discard:()=>{portal.preview=null;return {discarded:true};},
+    confirm:args=>confirm(args,false)
   };
   const run=(op,args)=>portal.serial(()=>ops[op](args));
   remote?.routes(app,{run});
@@ -86,11 +98,7 @@ export function createCompanion({portal=new TheirCare(),token=randomBytes(32).to
   app.post('/api/preview',route(req=>ops.preview(req.body)));
   app.get('/api/preview',route(()=>portal.preview?portal.getPreview(portal.preview.publicPart.id).publicPart:null));
   app.post('/api/discard',route(()=>ops.discard()));
-  app.post('/api/confirm',route(async req=>{
-    if(!req.isHumanUI || req.body.accept_terms!==true) throw new PortalError('Review and accept the terms yourself in the companion.','HUMAN_CONFIRMATION_REQUIRED');
-    if(demo) throw new PortalError('Sample mode cannot save real bookings.','DEMO_ONLY');
-    return portal.confirm(req.body.id);
-  }));
+  app.post('/api/confirm',route(req=>confirm(req.body,req.isHumanUI)));
   app.get('/',(req,res)=>{
     if(remote && !remote.owner.check(req)) return res.redirect(303,'/login');
     res.cookie('tc_ui',uiToken,{httpOnly:true,sameSite:'strict',path:'/',secure:!!remote});

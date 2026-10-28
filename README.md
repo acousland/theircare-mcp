@@ -72,10 +72,13 @@ The assistant should first call account_context for current child, service and c
 | theircare_availability | Availability and session conditions |
 | theircare_preview_changes | Unsaved booking, cancellation or waitlist review |
 | theircare_discard_preview | Discard the preview |
+| theircare_confirm_changes | Save the active preview (only when `THEIRCARE_ALLOW_AI_SAVE=true`) |
 
 Date ranges use **inclusive start / exclusive end**, up to 93 days. Previews support 1–31 dates for one child, care type and calendar year.
 
-There is **no MCP tool for final saving or accepting terms**. You confirm personally in the companion. One preview is active at a time, expiring after five minutes. Before saving, the adapter refreshes availability and review; changed fees/terms/state invalidate the old preview. It submits once, then checks the saved calendar. Check bookings before retrying an uncertain result.
+By default there is **no MCP tool for final saving or accepting terms**. You confirm personally in the companion.
+
+To let your assistant book and cancel directly, set `THEIRCARE_ALLOW_AI_SAVE=true` in the environment of the MCP server (or in `.env` for remote mode). This adds `theircare_confirm_changes`, which saves a preview after you agree in chat. The assistant then accepts TheirCare's booking terms on your behalf, and that may incur fees. The tool is marked destructive, so clients that support it ask before running it. It requires `accept_terms: true`, never works in sample mode, and uses the same re-check, single submit and calendar verification as the companion. One preview is active at a time, expiring after five minutes. Before saving, the adapter refreshes availability and review; changed fees/terms/state invalidate the old preview. It submits once, then checks the saved calendar. Check bookings before retrying an uncertain result.
 
 ## Privacy and local operation
 
@@ -102,7 +105,7 @@ What changes in remote mode:
 
 - **Sign in with Google** protects the companion and every OAuth approval. Only the one verified address in `THEIRCARE_OWNER_EMAIL` is let in.
 - AI apps register themselves, then you approve each one in the companion. Access tokens last 1 hour, and refresh tokens last 30 days and rotate on each use. Tokens are stored hashed in `data/oauth.json`. Delete that file to revoke every connection.
-- The local bridge token is disabled. There is still no MCP tool for final saving; you confirm in the companion.
+- The local bridge token is disabled. Final saving stays in the companion unless you opt in with `THEIRCARE_ALLOW_AI_SAVE=true`; the consent page then says the app can book and cancel.
 - Google sign-ins last 30 days and are stored hashed in `data/sessions.json`, so restarts keep you signed in.
 - Your TheirCare session stays in memory, so after a restart you sign in to TheirCare again. The server keeps it from idling out for up to 12 hours after each TheirCare sign-in.
 

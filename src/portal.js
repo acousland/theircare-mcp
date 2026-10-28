@@ -270,7 +270,7 @@ export class TheirCare {
     return p;
   }
   async confirm(id) {
-    // Called only by the local human review UI, never exported as an MCP tool.
+    // Called by the human review UI, or by MCP clients when THEIRCARE_ALLOW_AI_SAVE is on.
     const p=this.getPreview(id); this.preview=null;
     // Reload availability and regenerate the server review immediately before saving.
     // Any new fee/term/state change requires the user to review a new preview.

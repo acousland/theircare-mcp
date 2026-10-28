@@ -19,11 +19,11 @@ const fakeGoogle=async(url,opts)=>{
   const part=o=>Buffer.from(JSON.stringify(o)).toString('base64url');
   return Response.json({id_token:part({alg:'RS256'})+'.'+part(nextClaims)+'.sig'});
 };
-async function start(dataDir) {
+async function start(dataDir,{allowAiSave=false,portalFetch=demoFetch()}={}) {
   const srv=http.createServer();await new Promise(r=>srv.listen(0,'127.0.0.1',r));
   const base='http://localhost:'+srv.address().port;
-  const portal=new TheirCare({fetchImpl:demoFetch()});portal.authenticated=true;
-  const remote=await createRemote({publicUrl:base,google,dataDir,portal,fetchImpl:fakeGoogle});
+  const portal=new TheirCare({fetchImpl:portalFetch});portal.authenticated=true;
+  const remote=await createRemote({publicUrl:base,google,dataDir,portal,fetchImpl:fakeGoogle,allowAiSave});
   srv.on('request',remote.app);
   return {base,remote,close:()=>new Promise(r=>srv.close(r))};
 }
@@ -114,7 +114,7 @@ test('remote OAuth flow issues tokens that unlock MCP tools, and survive a resta
     assert.equal(list.result.tools.length,6);
     assert.ok(!list.result.tools.some(t=>/confirm|save/.test(t.name)));
     const status=await (await mcp(s.base,issued.access_token,{jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'theircare_status',arguments:{}}})).json();
-    assert.deepEqual(JSON.parse(status.result.content[0].text),{signed_in:true,demo:false,companion_url:s.base,remote:true});
+    assert.deepEqual(JSON.parse(status.result.content[0].text),{signed_in:true,demo:false,companion_url:s.base,ai_can_save:false,remote:true});
     const preview=await (await mcp(s.base,issued.access_token,{jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'theircare_preview_changes',arguments:{child_id:'1',care_type_id:'10',year:2026,changes:[{date:'2026-10-28',action:'book'}]}}})).json();
     assert.equal(JSON.parse(preview.result.content[0].text).review_url,s.base+'/#review');
 
@@ -169,6 +169,31 @@ test('remote companion pages and consent require the owner sign-in',async()=>{
     const bearerOnly=await get(s.base+'/api/status',{headers:{Authorization:'Bearer '+s.remote.token}});
     assert.equal(bearerOnly.status,401,'the local bridge token is disabled remotely');
   } finally {await s.remote.oauth.flush();await s.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('with AI saving enabled, MCP clients can confirm a preview once and only with accepted terms',async()=>{
+  const dir=await mkdtemp(path.join(tmpdir(),'tc-remote-'));
+  let commits=0;const fake=demoFetch({allowSave:true});
+  const s=await start(dir,{allowAiSave:true,portalFetch:async(url,o)=>{if(new URLSearchParams(o?.body).get('action')==='submitConfirm')commits++;return fake(url,o);}});
+  try {
+    const {client,verifier,redirect}=await authorize(s.base,await signIn(s.base));
+    const {access_token}=await (await token(s.base,{grant_type:'authorization_code',client_id:client.client_id,code:redirect.searchParams.get('code'),code_verifier:verifier,redirect_uri:REDIRECT})).json();
+    let id=10;
+    const call=async(name,args)=>{const r=await (await mcp(s.base,access_token,{jsonrpc:'2.0',id:id++,method:'tools/call',params:{name,arguments:args}})).json();const text=r.result.content[0].text;let data;try{data=JSON.parse(text);}catch{data=text;}return {...r.result,data};};
+    const tools=(await (await mcp(s.base,access_token,{jsonrpc:'2.0',id:1,method:'tools/list'})).json()).result.tools;
+    const confirmTool=tools.find(t=>t.name==='theircare_confirm_changes');
+    assert.ok(confirmTool);assert.equal(confirmTool.annotations.destructiveHint,true);
+    const preview=await call('theircare_preview_changes',{child_id:'1',care_type_id:'10',year:2026,changes:[{date:'2026-10-28',action:'book'}]});
+    assert.match(preview.data.note,/explicitly agree/);
+    const notAccepted=await call('theircare_confirm_changes',{preview_id:preview.data.id,accept_terms:false});
+    assert.equal(notAccepted.isError,true,'accept_terms must be true');
+    assert.equal(commits,0);
+    const saved=await call('theircare_confirm_changes',{preview_id:preview.data.id,accept_terms:true});
+    assert.equal(saved.isError,false);assert.deepEqual(saved.data,{saved:true,verified:true,changes:[{date:'2026-10-28',action:'book',verified:true}]});
+    assert.equal(commits,1);
+    const replay=await call('theircare_confirm_changes',{preview_id:preview.data.id,accept_terms:true});
+    assert.equal(replay.isError,true);assert.equal(replay.data.code,'PREVIEW_EXPIRED');assert.equal(commits,1);
+  } finally {await s.remote.oauth.flush();await s.remote.owner.flush();await s.close();await rm(dir,{recursive:true,force:true});}
 });
 
 test('remote URL must be a bare origin',async()=>{

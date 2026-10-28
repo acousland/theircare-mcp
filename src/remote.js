@@ -4,7 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
-import { createCompanion, errorBody } from './companion.js';
+import { createCompanion, errorBody, aiSaveEnabled } from './companion.js';
 import { createOwner } from './owner.js';
 import { createOAuthProvider } from './oauth.js';
 import { registerTools } from './tools.js';
@@ -18,7 +18,7 @@ const safeNext=n=>typeof n==='string'&&n.startsWith('/')&&!n.startsWith('//')&&!
 // Remote mode: the companion, an OAuth authorization server and a Streamable HTTP MCP endpoint on one origin.
 // publicUrl is the HTTPS origin the proxy (e.g. Tailscale Funnel) serves at its root.
 // google: {clientId, clientSecret, ownerEmail}; only ownerEmail can sign in.
-export async function createRemote({publicUrl,google,dataDir,portal=new TheirCare(),fetchImpl=fetch}) {
+export async function createRemote({publicUrl,google,dataDir,portal=new TheirCare(),fetchImpl=fetch,allowAiSave=aiSaveEnabled()}) {
   const origin=new URL(publicUrl);
   if(origin.origin!==publicUrl.replace(/\/$/,'')) throw Error('THEIRCARE_PUBLIC_URL must be an origin with no path, e.g. https://homeserver.example.ts.net');
   const resource=new URL('/mcp',origin);
@@ -47,7 +47,7 @@ export async function createRemote({publicUrl,google,dataDir,portal=new TheirCar
       res.set('Content-Security-Policy',"default-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' "+action);
       res.type('html').send(page('Allow access?',
         '<span class="eyebrow">Connection request</span><h2>'+esc(p.client?.client_name||'An AI app')+'</h2>'+
-        '<p class="muted">wants to read your TheirCare bookings and prepare unsaved previews. It cannot save bookings or accept terms; you still confirm in this companion.</p>'+
+        '<p class="muted">'+(allowAiSave?'wants to read your TheirCare bookings and <b>book or cancel sessions</b>, accepting TheirCare\'s terms for you after you agree in chat.':'wants to read your TheirCare bookings and prepare unsaved previews. It cannot save bookings or accept terms; you still confirm in this companion.')+'</p>'+
         '<p class="fine">Returns to <b>'+esc(target.protocol+'//'+target.host)+'</b>. Only approve if you just started connecting from that app.</p>'+
         '<form id="login" method="post" action="/oauth/consent"><input type="hidden" name="request" value="'+esc(req.query.request)+'"><input type="hidden" name="csrf" value="'+esc(session.csrf)+'">'+
         '<button class="primary" name="decision" value="approve">Allow access <span>→</span></button><button class="secondary" name="decision" value="deny">Deny</button></form>'));
@@ -66,7 +66,7 @@ export async function createRemote({publicUrl,google,dataDir,portal=new TheirCar
       registerTools(server,async(op,args)=>{
         try {return {data:await run(op,args),ok:true};}
         catch(e) {const data=errorBody(e);console.error('tool '+op+' failed: '+data.code);return {data,ok:false};}
-      });
+      },{allowSave:allowAiSave});
       const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
       res.on('close',()=>{transport.close();server.close();});
       try {await server.connect(transport);await transport.handleRequest(req,res,req.body);}
@@ -74,7 +74,7 @@ export async function createRemote({publicUrl,google,dataDir,portal=new TheirCar
     });
     app.all('/mcp',bearer,(req,res)=>res.status(405).set('Allow','POST').json({jsonrpc:'2.0',error:{code:-32000,message:'Method not allowed.'},id:null}));
   }
-  const companion=createCompanion({portal,origin:origin.origin,remote:{owner,routes}});
+  const companion=createCompanion({portal,origin:origin.origin,remote:{owner,routes},allowAiSave});
   return {...companion,oauth,owner};
 }
 
