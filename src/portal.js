@@ -114,7 +114,7 @@ export function parseReview(html, expected) {
 
 export class TheirCare {
   constructor({fetchImpl = fetch} = {}) {
-    this.fetchImpl = fetchImpl; this.reset(); this.queue = Promise.resolve();
+    this.fetchImpl = fetchImpl; this.lastOk = {at:0,path:''}; this.signedInAt = 0; this.reset(); this.queue = Promise.resolve();
   }
   reset() { this.jar = new CookieJar(); this.authenticated = false; this.preview = null; this.generation = randomUUID(); }
   async serial(fn) {
@@ -140,10 +140,14 @@ export class TheirCare {
       const text = await response.text();
       if(!response.ok) fail('TheirCare returned HTTP ' + response.status + '.', 'UPSTREAM_ERROR');
       if (!allowLogin && (url.pathname.endsWith('/login') || text.includes('id="signInFrm"'))) {
+        const now=Date.now();
+        this.onSessionLost?.({path:url.pathname,signed_in_minutes:Math.round((now-this.signedInAt)/60000),
+          idle_seconds:Math.round((now-this.lastOk.at)/1000),last_path:this.lastOk.path});
         this.authenticated=false; this.preview=null;
         fail('Sign in again in the local companion.', 'LOGIN_REQUIRED');
       }
       if(text.length > 8e6) fail('TheirCare response is too large.', 'UPSTREAM_ERROR');
+      this.lastOk={at:Date.now(),path:url.pathname};
       return {text,url:url.href,contentType:response.headers.get('content-type')||''};
     }
     fail('Too many redirects.', 'UPSTREAM_ERROR');
@@ -161,7 +165,7 @@ export class TheirCare {
     if(result.text.includes('id="signInFrm"') || result.url.includes('/login')) {
       this.reset(); fail('Sign-in was not accepted. Check your details or sign in on TheirCare to check for extra steps.', 'LOGIN_FAILED');
     }
-    await this.request('/family/dashboard'); this.authenticated=true;
+    await this.request('/family/dashboard'); this.authenticated=true; this.signedInAt=Date.now();
     return {signed_in:true};
   }
   requireLogin() { if(!this.authenticated) fail('Sign in in the local companion first.', 'LOGIN_REQUIRED'); }

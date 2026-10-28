@@ -64,7 +64,7 @@ export async function createRemote({publicUrl,google,dataDir,portal=new TheirCar
       // Stateless: one server and transport per request.
       const server=new McpServer({name:'theircare',version:'0.1.0'});
       registerTools(server,async(op,args)=>{
-        try {return {data:await run(op,args),ok:true};}
+        try {const data=await run(op,args);console.error('tool '+op+' ok');return {data,ok:true};}
         catch(e) {const data=errorBody(e);console.error('tool '+op+' failed: '+data.code);return {data,ok:false};}
       },{allowSave:allowAiSave});
       const transport=new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});

@@ -56,10 +56,11 @@ export function createCompanion({portal=new TheirCare(),token=randomBytes(32).to
   remote?.routes(app,{run});
   if(remote) {
     // TheirCare signs idle sessions out quickly. Remotely, refresh it for up to 12 hours after each sign-in.
+    portal.onSessionLost=d=>console.error('TheirCare session ended: '+JSON.stringify(d));
     setInterval(()=>{
       if(!portal.authenticated||demo||Date.now()>keepAliveUntil) return;
       portal.serial(()=>portal.request('/family/dashboard')).catch(e=>console.error('TheirCare keep-alive: '+(e.code||'error')));
-    },5*60000).unref();
+    },2*60000).unref();
   }
   app.use('/api',(req,res,next)=>{
     const bearer=!remote&&equal(req.headers.authorization,'Bearer '+token);
